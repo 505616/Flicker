@@ -195,7 +195,9 @@ for (const c of perCommit) {
   const rawCommitterDate = git('log', '-1', '--pretty=%cd', '--date=raw', c.sha).trim()
   const localSame = execFileSync('git', ['commit-tree', tree.sha, '-p', prev], {
     cwd: ROOT,
-    input: created.message,          // 原样（不带末尾换行）
+    // 用**本地对象里的原始正文**做重造（不能用 API 响应里的 `message`：
+    // GitHub 的响应会把它末尾的换行去掉，而存进去的对象是完整的 —— 拿响应去重造必对不上）
+    input: commitBody(c.sha),
     env: {
       ...process.env,
       GIT_AUTHOR_NAME: snap.author.name, GIT_AUTHOR_EMAIL: snap.author.email,
