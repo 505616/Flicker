@@ -53,9 +53,21 @@ else files = isWindows ? all : all.filter((f) => !WINDOWS_ONLY.has(f))
 
 const passThrough = argv.filter((a) => !['--all', '--fast', '--dry'].includes(a))
 
+/**
+ * 每个用例的超时（默认 3 分钟）。
+ *
+ * 为什么要有：2026-10 的 CI 第一次跑，**Windows 上"跑测试"这一步挂了 25 分钟还没结束**
+ * —— 一个用例卡住（表现是"永远不返回"），而 `node --test` 默认**没有**超时，
+ * 于是整个 job 就那么挂着，日志里也不会出现任何失败的名字。加上它之后，
+ * "卡住"会变成一个**带名字、带超时说明的失败**，一眼能看出是谁。
+ * 3 分钟是这个套件里最慢的用例（GUI + 真实 TLS 那几条，本地约 10 秒）的十余倍。
+ */
+const userHasTimeout = passThrough.some((a) => a.startsWith('--test-timeout'))
+const defaultTimeout = userHasTimeout ? [] : ['--test-timeout=180000']
+
 // 注意：文件名逐个列出（不用 glob）—— 这样平台过滤的结果是**确定**的，
 // 不会因为 shell 展开 glob 的顺序或范围不同而意外包含被排除的文件。
-const args = ['--test', '--test-concurrency=1', ...passThrough,
+const args = ['--test', '--test-concurrency=1', ...defaultTimeout, ...passThrough,
   ...files.map((f) => path.join('test', f))]
 
 /**
