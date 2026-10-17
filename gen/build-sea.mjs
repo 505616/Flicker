@@ -250,6 +250,35 @@ try {
   copyFileSync(process.execPath, outPath)
   log(' ', `${outName}  ${human(statSync(outPath).size)}`)
 
+  /**
+   * macOS：签名这件事比看上去麻烦，2026-10 的 CI 先后踩了两次。
+   *
+   * ① **注入前**先把 Node 自带的签名去掉 —— postject 要改 Mach-O 的载荷，带着有效签名去改，
+   *    得到的就是"签名与内容对不上"的文件，内核对它**直接 SIGKILL**。
+   * ② **注入后**必须重新签名（ad-hoc：`--sign -`，不需要证书、不需要联网），但**不能丢 entitlements**：
+   *    Node 的二进制带 `com.apple.security.cs.allow-jit` 等权限，V8 要靠 JIT 跑；
+   *    权限丢了在 arm64 + Hardened Runtime 下同样是"运行它没有任何输出、退出码 null（被信号杀掉）"。
+   *    所以先从**原 Node 二进制**里把 entitlements 取出来，重签时带回去。
+   * ③ 失败时把 `codesign -dv` 的输出一并打印 —— 那比"产物无法正常运行"有用得多。
+   */
+  let macEntitlements = null
+  if (process.platform === 'darwin') {
+    const dump = run('codesign', ['-d', '--entitlements', ':-', process.execPath])
+    if (/<plist/i.test(dump.out)) {
+      const start = dump.out.indexOf('<?xml')
+      const plist = start >= 0 ? dump.out.slice(start) : dump.out
+      macEntitlements = path.join(BUILD, 'entitlements.plist')
+      writeFileSync(macEntitlements, plist, 'utf8')
+      log(' ', '已从 Node 二进制里取出 entitlements（重签时带上，否则 V8 的 JIT 权限会丢）')
+    } else {
+      log(' ', '（Node 二进制里没有 entitlements，重签用 ad-hoc 默认值）')
+    }
+    const stripped = run('codesign', ['--remove-signature', outPath])
+    if (stripped.code !== 0) {
+      log(' ', `（去掉 Node 原有签名失败，继续试：${stripped.out.trim().slice(0, 200)}）`)
+    }
+  }
+
   // ⑤ 注入
   log('⑤', '注入 blob（postject）…')
   // 用 gen/npx.mjs 走"当前 node + npx-cli.js"，不经 shell：
@@ -274,21 +303,29 @@ try {
   //    表现是"运行它没有任何输出、退出码 -9/137"，在 Windows / Linux 上完全看不出来。
   //    Node 官方 SEA 文档也要求这一步；ad-hoc 签名（`--sign -`）不需要证书、不需要联网。
   if (process.platform === 'darwin') {
-    const rmSig = run('codesign', ['--remove-signature', outPath])
-    if (rmSig.code !== 0) {
-      fail(`去掉旧签名失败（codesign 不可用？）:\n${rmSig.out.slice(0, 600)}\n` +
-        'macOS 上构建单文件产物必须能调用 Xcode 命令行工具里的 codesign。')
+    // 重签时必须带上从 Node 二进制里取出的 entitlements（V8 的 JIT 权限在里面），
+    // 否则 arm64 + Hardened Runtime 下产物同样会被内核杀掉，而且**没有任何输出**。
+    const signArgs = ['--force', '--sign', '-', '--preserve-metadata=requirements,flags,runtime']
+    if (macEntitlements) signArgs.push('--entitlements', macEntitlements)
+    signArgs.push('--options', 'runtime', outPath)
+    const resign = run('codesign', signArgs)
+    if (resign.code !== 0) {
+      fail(`ad-hoc 签名失败（少了它，产物会被内核直接杀掉）:\n${resign.out.slice(0, 800)}`)
     }
-    const resign = run('codesign', ['--force', '--sign', '-', outPath])
-    if (resign.code !== 0) fail(`ad-hoc 签名失败:\n${resign.out.slice(0, 600)}`)
-    log(' ', 'ad-hoc 签名完成（macOS 必须：注入会破坏原有签名，未重签会被内核直接杀掉）')
+    const check = run('codesign', ['--verify', '--strict', '--verbose=2', outPath])
+    log(' ', `ad-hoc 签名完成（${check.code === 0 ? 'codesign --verify 通过' : 'verify 有告警'}，` +
+      '已带上 Node 的 entitlements）')
   }
 
   const ver = run(outPath, ['--version'])
   if (ver.code !== 0 || !/闪传 Flicker/.test(ver.out)) {
-    // 退出码一定要打出来：被系统杀掉（SIGKILL → -9/137）与"程序自己报错"是两回事，
-    // 而两者的 `out` 都可能为空 —— 2026-10 macOS 那次就是被内核杀掉的。
-    fail(`产物无法正常运行（退出码 ${ver.code}）:\n${ver.out.slice(0, 600)}`)
+    // 退出码一定要打出来：被系统杀掉（spawnSync 的 status 是 **null**）与"程序自己报错"
+    // 是两回事，而两者的输出都可能为空 —— 2026-10 macOS 两次都是被内核杀掉的。
+    const diag = process.platform === 'darwin'
+      ? `\n  codesign -dv:\n${run('codesign', ['-dv', '--verbose=4', outPath]).out.slice(0, 800)}`
+      : ''
+    fail(`产物无法正常运行（退出码 ${ver.code}${ver.code === null ? '，被信号杀掉' : ''}）:\n` +
+      `${ver.out.slice(0, 600)}${diag}`)
   }
   log(' ', ver.out.trim())
 

@@ -124,9 +124,48 @@ console.log(`\n$ node ${args.join(' ')}\n`)
 
 if (argv.includes('--dry')) process.exit(0)
 
-const child = spawn(process.execPath, args, { stdio: 'inherit', cwd: ROOT })
+/**
+ * 看门狗：**一段时间没有任何输出**就判定"卡住了"，主动杀掉并说清卡在哪一步。
+ *
+ * 为什么需要：2026-10 的 CI 在 Windows 上挂过 25 分钟 —— 某个用例永远不返回，
+ * 而 `node --test` 默认没有整体超时，job 就一直挂着，日志里连失败名字都没有。
+ * 每用例的 `--test-timeout` 管不了"卡在测试之外"（钩子、模块加载、子进程不退）。
+ * 这里管的是整体：5 分钟一声不响就当作卡死，把**最后的输出尾巴**打出来再失败 ——
+ * 有尾巴才能看出来是哪个用例、哪个子进程在攥着管道。
+ */
+const STALL_MS = Number(process.env.FLICKER_TEST_STALL_MS ?? 300_000)
+let tail = []
+let stallTimer = null
+let stalled = false
+
+const child = spawn(process.execPath, args, { stdio: ['inherit', 'pipe', 'pipe'], cwd: ROOT })
+const pump = (stream, out) => {
+  stream.on('data', (b) => {
+    out.write(b)
+    tail.push(b.toString())
+    if (tail.length > 80) tail.shift()
+    if (stallTimer) stallTimer.refresh()
+  })
+}
+pump(child.stdout, process.stdout)
+pump(child.stderr, process.stderr)
+
+if (STALL_MS > 0) {
+  stallTimer = setTimeout(() => {
+    stalled = true
+    console.error(`\n✗ ${Math.round(STALL_MS / 1000)} 秒没有任何输出 —— 有东西卡住了。`)
+    console.error('  最后 40 行输出：')
+    for (const line of tail.slice(-40)) console.error(line.replace(/\s+$/, ''))
+    console.error('\n（已经杀掉这个测试进程。卡住的用例名通常就在上面最后几行里；' +
+      '若是"测试跑完却不退出"，那就是某个子进程/句柄没关，见 gen/check-test-cleanup.mjs）')
+    try { child.kill('SIGKILL') } catch { /* 可能已经退出 */ }
+  }, STALL_MS)
+  stallTimer.unref?.()
+}
+
 child.on('exit', (code, signal) => {
-  const exitCode = signal ? 1 : (code ?? 0)
+  if (stallTimer) clearTimeout(stallTimer)
+  const exitCode = stalled ? 1 : signal ? 1 : (code ?? 0)
   if (tapFile) { checkReadmeCounts(tapFile); rmSync(tapFile, { force: true }) }
   process.exit(exitCode)
 })

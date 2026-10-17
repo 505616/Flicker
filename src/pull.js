@@ -121,7 +121,7 @@ function makeClient({ base, pinnedSha256 = null, timeoutMs = 60_000 }) {
     }
   }
 
-  return function request(reqPath, { method = 'GET', json = null, body = null } = {}) {
+  const request = function request(reqPath, { method = 'GET', json = null, body = null } = {}) {
     const url = new URL(base + reqPath)
     const doRequest = url.protocol === 'https:' ? httpsRequest : httpRequest
     return new Promise((resolve, reject) => {
@@ -148,6 +148,10 @@ function makeClient({ base, pinnedSha256 = null, timeoutMs = 60_000 }) {
       req.end()
     })
   }
+  // keep-alive 的连接必须显式关掉：否则 CLI 收完之后进程还挂着（socket 让它"有事可做"），
+  // 用户在终端看到的就是"传完了但命令不返回"。2026-10 在 CI 上排查卡住时想到的这条。
+  request.close = () => { try { agent?.destroy() } catch { /* 尽力而为 */ } }
+  return request
 }
 
 export const sha256Hex = (buf) => createHash('sha256').update(buf).digest('hex')
@@ -161,14 +165,15 @@ export async function probePeer({ base, timeoutMs = 15_000 }) {
   if (url.protocol !== 'https:') return { sha256: null, secure: false }
   const agent = new HttpsAgent({ keepAlive: false, rejectUnauthorized: false })
   return new Promise((resolve, reject) => {
+    const done = (fn, arg) => { try { agent.destroy() } catch { /* 尽力而为 */ } fn(arg) }
     const req = httpsRequest(url, { method: 'GET', agent, timeout: timeoutMs }, (res) => {
       const cert = res.socket.getPeerCertificate?.()
       res.resume()
-      if (!cert?.raw) { reject(new PullError('拿不到对端证书', 'NO_PEER_CERT')); return }
-      resolve({ sha256: sha256Hex(cert.raw), secure: true })
+      if (!cert?.raw) { done(reject, new PullError('拿不到对端证书', 'NO_PEER_CERT')); return }
+      done(resolve, { sha256: sha256Hex(cert.raw), secure: true })
     })
     req.on('timeout', () => req.destroy(new PullError('对方太久没有响应（是不是已经关掉了？）', 'TIMEOUT')))
-    req.on('error', (e) => reject(new PullError(
+    req.on('error', (e) => done(reject, new PullError(
       `连不上 ${base}：${e?.code === 'ECONNREFUSED' ? '对方没在监听（程序是不是已经关了？）' : (e?.message ?? e)}`,
       'CONNECT')))
     req.end()
@@ -422,6 +427,7 @@ export async function pullFromLink(o = {}) {
     }
   } finally {
     wipe(keys?.enc, keys?.auth, keys?.room)
+    client.close?.()
   }
 
   return { ok: failed.length === 0, dir: outDir, files: done, failed, bytes: totalBytes }

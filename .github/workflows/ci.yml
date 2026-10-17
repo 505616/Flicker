@@ -173,13 +173,19 @@ jobs:
       # 用 gen/run-tests.mjs 而不是在 workflow 里拼命令替换：
       # 那个脚本**本地也能跑**（`npm test` 就是它），所以 CI 里跑的东西
       # 和开发者本地跑的是同一份逻辑，不会出现"只有 CI 上才这样"的意外。
+      # 步骤级超时：2026-10 有一次 Windows 上的测试**卡住不返回**，而 job 没有超时，
+      # 就那么挂了 25 分钟、日志里连失败名字都没有。超时后至少能明确"是哪一步没结束"，
+      # 具体的卡住用例由 `--test-timeout`（gen/run-tests.mjs 默认 3 分钟）点名。
       - name: 跑测试（串行）
+        timeout-minutes: 25
         run: node gen/run-tests.mjs
 
       - name: 构建单文件产物（SEA 必须在本平台构建）
+        timeout-minutes: 20
         run: node gen/build-sea.mjs
 
       - name: 验证产物真的能跑
+        timeout-minutes: 15
         run: node gen/smoke-sea.mjs
 
       - name: 上传产物
