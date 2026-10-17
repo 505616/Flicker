@@ -173,12 +173,33 @@ for (const c of perCommit) {
     },
   }
   const created = await api('POST', `/repos/${REPO}/git/commits`, snap)
-  if (created.sha !== c.sha) {
-    fail(`commit SHA 不一致：本地 ${c.sha}，远端 ${created.sha} ` +
-      '（说明两端对提交对象的规范化不同，不能假装一致；先停下）')
+
+  // ⚠️ GitHub 会把提交说明**末尾的换行去掉**（git 本地默认保留一个），于是同样的树、
+  //    同样的作者与时间，SHA 仍然不同。解决办法不是"就让它不同"（那样两端看起来一样、
+  //    其实不是同一个提交，以后 fetch/push 立刻对不上），而是**在本地也造一个逐字节
+  //    相同的提交对象**：用 GitHub 存下来的说明文本 + 本地的原始时间戳跑 `git commit-tree`，
+  //    再核对两边 SHA 是否真的一致。一致才继续。
+  const rawAuthorDate = git('log', '-1', '--pretty=%ad', '--date=raw', c.sha).trim()
+  const rawCommitterDate = git('log', '-1', '--pretty=%cd', '--date=raw', c.sha).trim()
+  const localSame = execFileSync('git', ['commit-tree', tree.sha, '-p', prev], {
+    cwd: ROOT,
+    input: created.message,          // 原样（不带末尾换行）
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: snap.author.name, GIT_AUTHOR_EMAIL: snap.author.email,
+      GIT_AUTHOR_DATE: `@${rawAuthorDate}`,
+      GIT_COMMITTER_NAME: snap.committer.name, GIT_COMMITTER_EMAIL: snap.committer.email,
+      GIT_COMMITTER_DATE: `@${rawCommitterDate}`,
+    },
+  }).toString().trim()
+
+  if (localSame !== created.sha) {
+    fail(`本地重造的提交与远端不一致：本地 ${localSame}，远端 ${created.sha} —— ` +
+      '两端对提交对象的规范化不同，不能假装一致（停在这里，远端分支还没动）')
   }
-  console.log(`✓ commit ${c.sha.slice(0, 10)}  ${snap.message.split('\n')[0]}`)
-  prev = c.sha
+  console.log(`✓ commit ${localSame.slice(0, 10)}  ${created.message.split('\n')[0]}` +
+    '（两端逐字节相同）')
+  prev = localSame
 }
 
 // ── 4. 更新分支 ──
