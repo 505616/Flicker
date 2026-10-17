@@ -267,9 +267,28 @@ try {
 
   // ⑥ 自检：真的跑起来看看
   log('⑥', '自检产物…')
+
+  // ⚠️ macOS 必须先**重新做一次 ad-hoc 签名**才能跑（2026-10 CI 第一次跑抓到的）。
+  //    不是我们的代码有问题：postject 往 Mach-O 里注入 blob 会改掉原有签名，
+  //    而 macOS 内核对"签名与内容对不上"的可执行文件是**直接 SIGKILL** 的 ——
+  //    表现是"运行它没有任何输出、退出码 -9/137"，在 Windows / Linux 上完全看不出来。
+  //    Node 官方 SEA 文档也要求这一步；ad-hoc 签名（`--sign -`）不需要证书、不需要联网。
+  if (process.platform === 'darwin') {
+    const rmSig = run('codesign', ['--remove-signature', outPath])
+    if (rmSig.code !== 0) {
+      fail(`去掉旧签名失败（codesign 不可用？）:\n${rmSig.out.slice(0, 600)}\n` +
+        'macOS 上构建单文件产物必须能调用 Xcode 命令行工具里的 codesign。')
+    }
+    const resign = run('codesign', ['--force', '--sign', '-', outPath])
+    if (resign.code !== 0) fail(`ad-hoc 签名失败:\n${resign.out.slice(0, 600)}`)
+    log(' ', 'ad-hoc 签名完成（macOS 必须：注入会破坏原有签名，未重签会被内核直接杀掉）')
+  }
+
   const ver = run(outPath, ['--version'])
   if (ver.code !== 0 || !/闪传 Flicker/.test(ver.out)) {
-    fail(`产物无法正常运行:\n${ver.out.slice(0, 600)}`)
+    // 退出码一定要打出来：被系统杀掉（SIGKILL → -9/137）与"程序自己报错"是两回事，
+    // 而两者的 `out` 都可能为空 —— 2026-10 macOS 那次就是被内核杀掉的。
+    fail(`产物无法正常运行（退出码 ${ver.code}）:\n${ver.out.slice(0, 600)}`)
   }
   log(' ', ver.out.trim())
 
