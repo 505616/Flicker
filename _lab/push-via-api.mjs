@@ -140,35 +140,33 @@ try {
 const commits = git('rev-list', '--reverse', `${remoteSha}..HEAD`).trim().split('\n').filter(Boolean)
 console.log(`要做 ${commits.length} 个提交（接在远端的 ${remoteSha.slice(0, 10)} 后面）`)
 
-// ── 2. 所有提交里的 blob 去重上传 ──
+// ── 2. 建树：直接把文件内容放进 tree（不逐个建 blob）──
+//
+// ⚠️ 一开始是"每个 blob 一个 POST"，269 个文件 × 4 个提交 = 上千次请求，
+//    被 GitHub 的**二级限流**拦下（403 You have exceeded a secondary rate limit）。
+//    `/git/trees` 支持在条目里直接给 `content`，GitHub 会自己建 blob ——
+//    于是每次提交只要 1 个请求。代价是请求体大一点（本仓库 3.8 MB 的文本），
+//    但这是"请求数"与"请求体"之间显然划算的取舍。
 const perCommit = commits.map((sha) => ({ sha, entries: treeEntriesOf(sha) }))
+
+/** 取一批 blob 的原始字节（一次进程） */
 const allBlobs = new Set()
 for (const c of perCommit) for (const e of c.entries) allBlobs.add(e.sha)
 const blobData = readBlobs([...allBlobs])
-console.log(`文件条目：${perCommit.reduce((a, c) => a + c.entries.length, 0)}，` +
-  `去重后 blob：${blobData.size}`)
-
-let done = 0
-const queue = [...blobData.entries()]
-async function worker() {
-  for (;;) {
-    const item = queue.shift()
-    if (!item) return
-    const [sha, data] = item
-    const r = await api('POST', `/repos/${REPO}/git/blobs`, {
-      content: Buffer.from(data).toString('base64'), encoding: 'base64',
-    })
-    if (r.sha !== sha) fail(`blob SHA 对不上：本地 ${sha}，远端 ${r.sha}（不该发生）`)
-    done++
-    if (done % 25 === 0 || done === blobData.size) console.log(`  已上传 ${done}/${blobData.size}`)
-  }
-}
-await Promise.all(Array.from({ length: 6 }, worker))
+console.log(`要做 ${perCommit.length} 个提交，共 ${allBlobs.size} 个不同文件（全部内联进 tree）`)
 
 // ── 3. 逐个提交：建树 → 建提交（SHA 必须与本地一致）──
 let prev = remoteSha
 for (const c of perCommit) {
-  const tree = await api('POST', `/repos/${REPO}/git/trees`, { tree: c.entries })
+  const tree = await api('POST', `/repos/${REPO}/git/trees`, {
+    tree: c.entries.map((e) => ({
+      path: e.path,
+      mode: e.mode,
+      type: 'blob',
+      // 内容按 UTF-8 文本传；这个仓库里没有二进制文件（有的话这里会先被下面的校验挡住）
+      content: Buffer.from(blobData.get(e.sha)).toString('utf8'),
+    })),
+  })
   const localTree = git('rev-parse', `${c.sha}^{tree}`).trim()
   if (tree.sha !== localTree) fail(`tree SHA 不一致：本地 ${localTree}，远端 ${tree.sha}`)
 
@@ -191,29 +189,26 @@ for (const c of perCommit) {
 
   // 核对：GitHub 生成的提交必须与本地**逐字节同一个提交**。不相等就不往下走 ——
   // 两端"看起来一样、其实不是同一个提交"会在下次 fetch/push 时立刻炸，而且很难解释。
-  const rawAuthorDate = git('log', '-1', '--pretty=%ad', '--date=raw', c.sha).trim()
-  const rawCommitterDate = git('log', '-1', '--pretty=%cd', '--date=raw', c.sha).trim()
-  const localSame = execFileSync('git', ['commit-tree', tree.sha, '-p', prev], {
-    cwd: ROOT,
-    // 用**本地对象里的原始正文**做重造（不能用 API 响应里的 `message`：
-    // GitHub 的响应会把它末尾的换行去掉，而存进去的对象是完整的 —— 拿响应去重造必对不上）
-    input: commitBody(c.sha),
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: snap.author.name, GIT_AUTHOR_EMAIL: snap.author.email,
-      GIT_AUTHOR_DATE: `@${rawAuthorDate}`,
-      GIT_COMMITTER_NAME: snap.committer.name, GIT_COMMITTER_EMAIL: snap.committer.email,
-      GIT_COMMITTER_DATE: `@${rawCommitterDate}`,
-    },
-  }).toString().trim()
-
-  if (localSame !== created.sha) {
-    fail(`本地重造的提交与远端不一致：本地 ${localSame}，远端 ${created.sha} —— ` +
+  if (created.sha !== c.sha) {
+    const rawAuthorDate = git('log', '-1', '--pretty=%ad', '--date=raw', c.sha).trim()
+    const rawCommitterDate = git('log', '-1', '--pretty=%cd', '--date=raw', c.sha).trim()
+    const localSame = execFileSync('git', ['commit-tree', tree.sha, '-p', prev], {
+      cwd: ROOT,
+      input: commitBody(c.sha),
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: snap.author.name, GIT_AUTHOR_EMAIL: snap.author.email,
+        GIT_AUTHOR_DATE: `@${rawAuthorDate}`,
+        GIT_COMMITTER_NAME: snap.committer.name, GIT_COMMITTER_EMAIL: snap.committer.email,
+        GIT_COMMITTER_DATE: `@${rawCommitterDate}`,
+      },
+    }).toString().trim()
+    fail(`提交 SHA 不一致：本地 ${c.sha}，远端 ${created.sha}（本地重造得到 ${localSame}）—— ` +
       '两端对提交对象的规范化不同，不能假装一致（停在这里，远端分支还没动）')
   }
-  console.log(`✓ commit ${localSame.slice(0, 10)}  ${created.message.split('\n')[0]}` +
-    '（两端逐字节相同）')
-  prev = localSame
+  console.log(`✓ commit ${c.sha.slice(0, 10)}  ${snap.message.split('\n')[0]}` +
+    `（tree ${tree.sha.slice(0, 8)}，远端逐字节相同）`)
+  prev = c.sha
 }
 
 // ── 4. 更新分支 ──
