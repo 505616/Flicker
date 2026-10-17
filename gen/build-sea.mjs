@@ -73,7 +73,7 @@ let embeddedSourcePack = 'source-pack.fkz'
 
 function run(cmd, argv, opts = {}) {
   const r = spawnSync(cmd, argv, { encoding: 'utf8', ...opts })
-  return { code: r.status, out: (r.stdout ?? '') + (r.stderr ?? '') }
+  return { code: r.status, signal: r.signal ?? null, out: (r.stdout ?? '') + (r.stderr ?? '') }
 }
 
 function platformTag() {
@@ -305,9 +305,12 @@ try {
   if (process.platform === 'darwin') {
     // 重签时必须带上从 Node 二进制里取出的 entitlements（V8 的 JIT 权限在里面），
     // 否则 arm64 + Hardened Runtime 下产物同样会被内核杀掉，而且**没有任何输出**。
-    const signArgs = ['--force', '--sign', '-', '--preserve-metadata=requirements,flags,runtime']
+    // ⚠️ 刻意**不加** `--options runtime`：它会开启 Hardened Runtime，而 Node 的二进制里
+    //    entitlements 未必带着 V8 需要的 JIT 例外；开启后正是"签名有效但一跑就被杀"。
+    //    Node 官方 SEA 文档的做法是保留原 flags/requirements/entitlements，别额外加压。
+    const signArgs = ['--force', '--sign', '-', '--preserve-metadata=requirements,flags']
     if (macEntitlements) signArgs.push('--entitlements', macEntitlements)
-    signArgs.push('--options', 'runtime', outPath)
+    signArgs.push(outPath)
     const resign = run('codesign', signArgs)
     if (resign.code !== 0) {
       fail(`ad-hoc 签名失败（少了它，产物会被内核直接杀掉）:\n${resign.out.slice(0, 800)}`)
@@ -324,7 +327,8 @@ try {
     const diag = process.platform === 'darwin'
       ? `\n  codesign -dv:\n${run('codesign', ['-dv', '--verbose=4', outPath]).out.slice(0, 800)}`
       : ''
-    fail(`产物无法正常运行（退出码 ${ver.code}${ver.code === null ? '，被信号杀掉' : ''}）:\n` +
+    fail(`产物无法正常运行（退出码 ${ver.code}` +
+      `${ver.signal ? `，被信号 ${ver.signal} 杀掉` : ''}）:\n` +
       `${ver.out.slice(0, 600)}${diag}`)
   }
   log(' ', ver.out.trim())

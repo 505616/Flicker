@@ -31,7 +31,33 @@ import { keyUsageOf, OID_SERVER_AUTH } from './x509.js'
 // 而且只有这一份实现。这里转出去，是因为历史上它属于本模块的公开 API。
 export { keyUsageOf }
 
-const pexec = promisify(execFile)
+const execFileAsync = promisify(execFile)
+
+/**
+ * 跑一个外部命令（PowerShell / certutil），**一定带超时**。
+ *
+ * 为什么必须带：2026-10 的 CI 第一次在 Windows 上跑，`CA 能装入信任库` 与
+ * `cleanResidual` 两条用例各挂了 180 秒 —— 证书库命令**卡住不返回**，
+ * 而 `execFile` 默认没有超时，于是 Promise 永远不 settle，整个测试进程只能被看门狗杀掉。
+ * 卡住的原因可能是损坏的证书库、策略拦截、或某个命令在等标准输入；
+ * 无论哪种，正确的表现都是**明确报错**（哪条命令、等了多久、退出码/信号是什么），
+ * 而不是让调用方无限等待。
+ */
+const PEXEC_TIMEOUT_MS = Number(process.env.FLICKER_PEXEC_TIMEOUT_MS ?? 60_000)
+async function pexec(cmd, argv, opts = {}) {
+  try {
+    return await execFileAsync(cmd, argv, { timeout: PEXEC_TIMEOUT_MS, ...opts })
+  } catch (e) {
+    const why = e?.killed ? `超过 ${PEXEC_TIMEOUT_MS} 毫秒没有返回（已强制结束）`
+      : (e?.signal ? `被信号 ${e.signal} 结束` : `退出码 ${e?.code}`)
+    const err = new Error(`${cmd} ${why}：${(e?.stderr || e?.message || '').toString().trim().slice(0, 300)}`)
+    err.code = e?.code
+    err.killed = e?.killed
+    err.signal = e?.signal
+    err.stderr = e?.stderr
+    throw err
+  }
+}
 
 /**
  * 跑 Windows PowerShell **5.1**（`powershell.exe`）时的环境变量。
