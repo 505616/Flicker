@@ -1,0 +1,9 @@
+# 闪传 Flicker 中继配置
+# 由 relay/deploy.mjs 生成；可以自由修改（比如换 name、加自定义域）
+name = "flicker"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# ⚠️ 刻意不配置任何持久化设施（KV / D1 / R2 / Durable Objects）。
+#    消息只存在于内存里 —— 这是"用完即销毁"的落点之一。
+#    如果你加了存储，请重新审视那个承诺。

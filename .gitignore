@@ -1,0 +1,43 @@
+# 构建产物（94 MB，由 CI 各平台自己构建，不进仓库）
+dist/
+
+# 临时与实验产物
+*.log
+*.tmp
+tmp/
+_lab/out/
+_lab/tmp/
+
+# 凭据：Cloudflare 的部署密钥（用户粘贴令牌用，见 relay/api-token.txt）
+# ⚠️ 它同时被 src/gift.js 的 PACK_EXCLUDES 排除，并有机器判据盯着"绝不许进赠品"
+relay/api-token.txt
+
+# ⚠️ wrangler 的本地状态：里面有**账号 id 与邮箱**（"这台机器/这个人"的东西，不是源码）
+#    2026-10 用户要求检查个人信息时发现它曾经跟着赠品源码包一起发出去过 ——
+#    现在 PACK_EXCLUDES 也挡着它，判据在 gen/check-pack-pii.mjs。仓库里当然也不该有。
+.wrangler/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# ⚠️ 刻意**不忽略**的东西（写在这里是为了让以后的人知道我考虑过）：
+#
+#   relay/page.generated.js   —— 它是从 web/receiver.html 生成的，但它**进仓库**：
+#                                部署中继的人不该被要求先跑一遍生成脚本。
+#                                `gen/gen-relay-page.mjs` 会校验它与源文件的指纹一致，
+#                                不一致就报错并重新生成，所以不会悄悄过期。
+#
+#   _lab/*.md                 —— 实测报告是**证据**，要跟着代码一起走。
+#                                里面有"我们怎么验的、结果是什么"，删掉就没法复核了。
+#
+#   package-lock.json         —— 本项目零依赖，本来就不该有它。
+#                                如果它出现了，说明有人装了包 —— 值得看一眼。

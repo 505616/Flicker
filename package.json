@@ -1,0 +1,54 @@
+{
+  "name": "flicker-transfer",
+  "version": "0.1.0",
+  "description": "闪传 Flicker —— 一次性文件传输，接收端零安装，用完即销毁",
+  "type": "module",
+  "bin": {
+    "flicker": "bin/flicker.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node gen/run-tests.mjs",
+    "test:all": "node gen/run-tests.mjs --all",
+    "test:fast": "node gen/run-tests.mjs --fast",
+    "test:dry": "node gen/run-tests.mjs --dry",
+    "test:plan": "node gen/test-plan.mjs",
+    "test:parallel": "node --test \"test/*.test.js\"",
+    "check": "node gen/check-no-deps.mjs && node gen/check-line-endings.mjs && node gen/check-test-cleanup.mjs && node gen/inline-i18n.mjs --check && node gen/inline-pwa.mjs --check && node gen/inline-path-rules.mjs --check && node gen/inline-plugins.mjs --check && node gen/inline-phone.mjs --check && node gen/gen-relay-page.mjs --check && node gen/check-doc-links.mjs && node gen/check-doc-pairs.mjs && node gen/check-manifest-doc.mjs && node gen/check-recv-protocol-doc.mjs && node gen/check-send-protocol-doc.mjs && node gen/check-plugin-doc.mjs && node gen/check-plugin-gaps.mjs && node gen/check-doc-flags.mjs && node gen/check-temp-dirs.mjs && node gen/check-pack-pii.mjs && node gen/check-source-pack.mjs && node gen/test-plan.mjs --check && node _lab/check-docs.mjs && node gen/check-manual-ui.mjs && node gen/check-ci-parity.mjs",
+    "i18n": "node gen/inline-i18n.mjs",
+    "pwa": "node gen/inline-pwa.mjs",
+    "relay-page": "node gen/gen-relay-page.mjs",
+    "build": "node gen/build-sea.mjs",
+    "smoke": "node gen/smoke-sea.mjs",
+    "release": "node gen/release.mjs",
+    "release:check": "node gen/release.mjs --check",
+    "start": "node bin/flicker.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "web/",
+    "README.md",
+    "读我.md",
+    "CHANGELOG.md",
+    "变更记录.md",
+    "LICENSE",
+    "中文文档/",
+    "docs/"
+  ],
+  "keywords": [
+    "file-transfer",
+    "one-time",
+    "e2ee",
+    "end-to-end-encryption",
+    "zero-dependency",
+    "self-destructing",
+    "nodejs",
+    "零依赖"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}

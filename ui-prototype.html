@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>闪传 Flicker · UI 原型</title>
+<style>
+/* ============================================================
+   闪传 Flicker — UI 原型
+   这是一份可点击的设计稿，不是真实程序。
+   设计令牌与最终 web/receiver.html 共用。
+   ============================================================ */
+
+:root {
+  --bg:            #0b0e14;
+  --bg-elev:       #121722;
+  --bg-elev-2:     #1a2130;
+  --border:        #232c3d;
+  --border-soft:   #1b2331;
+  --text:          #e6ebf5;
+  --text-dim:      #8c9ab4;
+  --text-faint:    #5b6883;
+  --accent:        #4d9fff;
+  --accent-soft:   rgba(77,159,255,.12);
+  --ok:            #2fbf71;
+  --warn:          #f0a83c;
+  --danger:        #ff5f57;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 18px 50px -12px rgba(0,0,0,.6);
+}
+
+[data-theme="light"] {
+  --bg:            #f4f6fa;
+  --bg-elev:       #ffffff;
+  --bg-elev-2:     #eef1f7;
+  --border:        #dde3ed;
+  --border-soft:   #e8edf5;
+  --text:          #131a26;
+  --text-dim:      #5d6b83;
+  --text-faint:    #8b98ae;
+  --accent:        #1a73e8;
+  --accent-soft:   rgba(26,115,232,.08);
+  --ok:            #12915a;
+  --warn:          #b8720d;
+  --danger:        #d93a30;
+  --shadow: 0 18px 44px -16px rgba(20,30,50,.22);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  transition: background .25s, color .25s;
+}
+
+/* ── 顶部：原型导航（真实程序里不存在） ───────────────── */
+.proto-bar {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; gap: 14px;
+  padding: 11px 20px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+.proto-tag {
+  font: 600 10.5px/1 var(--mono);
+  letter-spacing: .09em; text-transform: uppercase;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 11%, transparent);
+  padding: 5px 8px; border-radius: 5px;
+}
+.proto-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.proto-tab {
+  font: 500 13px/1 var(--sans);
+  color: var(--text-dim); background: transparent;
+  border: 1px solid transparent; border-radius: 7px;
+  padding: 7px 13px; cursor: pointer;
+  transition: all .16s;
+}
+.proto-tab:hover { color: var(--text); background: var(--bg-elev-2); }
+.proto-tab.on {
+  color: var(--accent); background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.spacer { flex: 1; }
+.theme-btn {
+  font: 500 12.5px/1 var(--sans); color: var(--text-dim);
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 7px 12px; cursor: pointer;
+}
+.theme-btn:hover { color: var(--text); }
+
+/* ── 舞台 ─────────────────────────────────────────────── */
+.stage { padding: 34px 20px 70px; display: flex; justify-content: center; }
+.screen { display: none; width: 100%; }
+.screen.on { display: block; animation: rise .3s cubic-bezier(.2,.8,.3,1); }
+@keyframes rise { from { opacity: 0; transform: translateY(9px); } }
+
+.hint {
+  max-width: 500px; margin: 0 auto 22px;
+  font: 400 12.5px/1.65 var(--sans); color: var(--text-faint);
+  text-align: center;
+}
+.hint b { color: var(--text-dim); font-weight: 600; }
+
+/* ── 浏览器窗口外壳 ───────────────────────────────────── */
+.browser {
+  max-width: 500px; margin: 0 auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.browser.wide { max-width: 560px; }
+.chrome {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 13px;
+  background: var(--bg-elev-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.dots { display: flex; gap: 6px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
+.dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+.url {
+  flex: 1; display: flex; align-items: center; gap: 7px;
+  font: 400 11.5px/1 var(--mono); color: var(--text-faint);
+  background: var(--bg); border: 1px solid var(--border-soft);
+  border-radius: 7px; padding: 7px 11px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.lock { color: var(--ok); flex: none; font-size: 10px; }
+
+/* ── 页面主体 ─────────────────────────────────────────── */
+.page { padding: 30px 30px 32px; }
+@media (max-width: 540px) { .page { padding: 24px 20px 26px; } }
+
+.brand { display: flex; align-items: center; gap: 11px; margin-bottom: 5px; }
+.logo {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  background: linear-gradient(140deg, var(--accent), #7b5cff);
+  display: grid; place-items: center;
+  font-size: 17px; box-shadow: 0 5px 16px -5px var(--accent);
+}
+.brand-name { font: 650 19px/1 var(--sans); letter-spacing: -.015em; }
+.brand-sub { font: 400 12px/1.4 var(--sans); color: var(--text-faint); margin-top: 3px; }
+
+h2.title { font: 600 21px/1.35 var(--sans); letter-spacing: -.018em; margin-bottom: 7px; }
+p.sub { font: 400 13.5px/1.6 var(--sans); color: var(--text-dim); margin-bottom: 22px; }
+
+/* ── 状态徽章 ─────────────────────────────────────────── */
+.badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: 500 12px/1 var(--sans);
+  padding: 6px 11px; border-radius: 999px;
+  background: var(--bg-elev-2); color: var(--text-dim);
+  border: 1px solid var(--border-soft);
+}
+.badge.ok    { color: var(--ok);    background: color-mix(in srgb, var(--ok) 11%, transparent);    border-color: color-mix(in srgb, var(--ok) 26%, transparent); }
+.badge.warn  { color: var(--warn);  background: color-mix(in srgb, var(--warn) 11%, transparent);  border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
+.badge.err   { color: var(--danger);background: color-mix(in srgb, var(--danger) 11%, transparent);border-color: color-mix(in srgb, var(--danger) 26%, transparent); }
+.pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* ── 输入区 ───────────────────────────────────────────── */
+label.fl {
+  display: block; font: 600 11.5px/1 var(--sans);
+  letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-faint); margin-bottom: 9px;
+}
+.pw-wrap { position: relative; margin-bottom: 14px; }
+input.pw {
+  width: 100%; font: 500 15px/1 var(--mono); letter-spacing: .06em;
+  color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 15px 46px 15px 15px;
+  outline: none; transition: border-color .16s, box-shadow .16s;
+}
+input.pw:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input.pw::placeholder { color: var(--text-faint); letter-spacing: 0; font-weight: 400; }
+.eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--text-faint); font-size: 15px; padding: 8px 11px; border-radius: 7px;
+}
+.eye:hover { color: var(--text); }
+
+/* 强度条 */
+.strength { display: flex; gap: 4px; margin: -6px 0 16px; }
+.strength i { flex: 1; height: 3px; border-radius: 2px; background: var(--border); }
+.strength.s1 i:nth-child(1) { background: var(--danger); }
+.strength.s2 i:nth-child(-n+2) { background: var(--warn); }
+.strength.s3 i:nth-child(-n+3) { background: #7fbf3f; }
+.strength.s4 i { background: var(--ok); }
+
+/* ── 按钮 ─────────────────────────────────────────────── */
+.btn {
+  width: 100%; font: 600 14.5px/1 var(--sans);
+  color: #fff; background: var(--accent);
+  border: 0; border-radius: var(--radius-sm);
+  padding: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: filter .16s, transform .1s;
+}
+.btn:hover { filter: brightness(1.09); }
+.btn:active { transform: scale(.99); }
+.btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+.btn.ghost {
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.btn.ghost:hover { color: var(--text); background: var(--bg-elev-2); filter: none; }
+.btn.danger { background: transparent; color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
+.btn.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); filter: none; }
+.btn-row { display: flex; gap: 10px; }
+
+/* ── 文件清单 ─────────────────────────────────────────── */
+.files {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  overflow: hidden; margin-bottom: 18px;
+}
+.file {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; background: var(--bg);
+  border-bottom: 1px solid var(--border-soft);
+}
+.file:last-child { border-bottom: 0; }
+.file-ic {
+  width: 30px; height: 30px; border-radius: 7px; flex: none;
+  display: grid; place-items: center; font-size: 14px;
+  background: var(--bg-elev-2);
+}
+.file-meta { flex: 1; min-width: 0; }
+.file-name {
+  font: 500 13.5px/1.35 var(--sans);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-size { font: 400 11.5px/1 var(--mono); color: var(--text-faint); margin-top: 3px; }
+.file-sum {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 11px 14px; background: var(--bg-elev-2);
+  font: 500 12px/1 var(--sans); color: var(--text-dim);
+}
+.file-sum b { color: var(--text); font-weight: 600; }
+
+/* ── 进度 ─────────────────────────────────────────────── */
+.bar { height: 7px; border-radius: 4px; background: var(--bg-elev-2); overflow: hidden; margin-bottom: 11px; }
+.bar > i {
+  display: block; height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), #7b5cff);
+  transition: width .5s cubic-bezier(.4,0,.2,1);
+}
+.bar.thin { height: 4px; margin: 0; }
+.stats { display: flex; justify-content: space-between; font: 400 12.5px/1 var(--mono); color: var(--text-dim); }
+.stats b { color: var(--text); font-weight: 600; }
+
+.cur-file {
+  padding: 14px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); background: var(--bg); margin-bottom: 15px;
+}
+.cur-file .top { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; }
+.cur-file .nm { flex: 1; min-width: 0; font: 500 13.5px/1.35 var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cur-file .pc { font: 600 13px/1 var(--mono); color: var(--accent); flex: none; }
+
+.speed {
+  display: flex; gap: 20px; margin-top: 16px;
+  padding-top: 15px; border-top: 1px solid var(--border-soft);
+}
+.speed > div { flex: 1; }
+.speed .k { font: 500 10.5px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }
+.speed .v { font: 600 15px/1 var(--mono); }
+.speed .v.blue { color: var(--accent); }
+
+/* ── 成败页 ───────────────────────────────────────────── */
+.big-ic {
+  width: 62px; height: 62px; border-radius: 50%; margin: 0 auto 20px;
+  display: grid; place-items: center; font-size: 29px;
+}
+.big-ic.ok   { background: color-mix(in srgb, var(--ok) 13%, transparent);     color: var(--ok);     box-shadow: 0 0 0 9px color-mix(in srgb, var(--ok) 6%, transparent); }
+.big-ic.err  { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); box-shadow: 0 0 0 9px color-mix(in srgb, var(--danger) 6%, transparent); }
+.big-ic.warn { background: color-mix(in srgb, var(--warn) 13%, transparent);   color: var(--warn);   box-shadow: 0 0 0 9px color-mix(in srgb, var(--warn) 6%, transparent); }
+.center { text-align: center; }
+
+.note {
+  display: flex; gap: 10px; align-items: flex-start;
+  font: 400 12.5px/1.55 var(--sans); color: var(--text-dim);
+  background: var(--bg-elev-2); border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 16px;
+  text-align: left;
+}
+.note.warn { background: color-mix(in srgb, var(--warn) 8%, transparent); border-color: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.note.err  { background: color-mix(in srgb, var(--danger) 8%, transparent); border-color: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
+.note .i { flex: none; font-size: 14px; line-height: 1.3; }
+
+.destroyed {
+  font: 400 12px/1.6 var(--mono); color: var(--text-faint);
+  background: var(--bg); border: 1px dashed var(--border);
+  border-radius: var(--radius-sm); padding: 13px 15px; text-align: left;
+}
+.destroyed .ck { color: var(--ok); }
+
+/* ── 终端窗口 ─────────────────────────────────────────── */
+.term {
+  max-width: 700px; margin: 0 auto;
+  background: #0a0d13; border: 1px solid #1e2532;
+  border-radius: 11px; box-shadow: var(--shadow); overflow: hidden;
+}
+.term-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 13px; background: #12171f; border-bottom: 1px solid #1e2532;
+}
+.term-title { font: 500 11.5px/1 var(--sans); color: #5f6d85; }
+.term-body {
+  padding: 19px 21px 24px; font: 400 12.7px/1.62 var(--mono);
+  color: #c6d0e0; white-space: pre; overflow-x: auto;
+}
+.c-dim   { color: #5f6d85; }
+.c-cyan  { color: #45d4c8; }
+.c-blue  { color: #5aa9ff; }
+.c-green { color: #4fd07a; }
+.c-yellow{ color: #f0c04a; }
+.c-red   { color: #ff6b60; }
+.c-bold  { color: #eaf0fa; font-weight: 600; }
+.c-white { color: #ffffff; font-weight: 600; }
+.c-bg    { background: #1b2433; color: #eaf0fa; }
+.c-inv   { background: #45d4c8; color: #0a0d13; font-weight: 600; }
+
+/* ── 站点页（发送端图形界面） ─────────────────────────── */
+.station { max-width: 620px; margin: 0 auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.st-head { display: flex; align-items: center; gap: 12px; padding: 15px 22px; background: var(--bg-elev-2); border-bottom: 1px solid var(--border-soft); }
+.st-head .brand { margin: 0; }
+.drop {
+  border: 1.5px dashed var(--border); border-radius: var(--radius);
+  padding: 34px 20px; text-align: center; cursor: pointer;
+  transition: all .18s; background: var(--bg);
+}
+.drop:hover { border-color: var(--accent); background: var(--accent-soft); }
+.drop .ic { font-size: 30px; opacity: .55; margin-bottom: 11px; }
+.drop .t1 { font: 600 14.5px/1.4 var(--sans); margin-bottom: 5px; }
+.drop .t2 { font: 400 12px/1.5 var(--sans); color: var(--text-faint); }
+.drop-btns { display: flex; gap: 9px; justify-content: center; margin-top: 16px; }
+.mini {
+  font: 500 12.5px/1 var(--sans); color: var(--text-dim);
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 9px 14px; cursor: pointer;
+}
+.mini:hover { color: var(--text); border-color: var(--accent); }
+.sec { padding: 20px 22px; border-top: 1px solid var(--border-soft); }
+.sec-h { font: 600 11.5px/1 var(--sans); letter-spacing: .05em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 13px; }
+.pw-inline { display: flex; gap: 9px; align-items: center; }
+.pw-inline input {
+  flex: 1; font: 600 14.5px/1 var(--mono); letter-spacing: .05em;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 12px 14px; outline: none;
+}
+.pw-inline input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chk { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; cursor: pointer; }
+.chk .box {
+  width: 17px; height: 17px; border-radius: 5px; flex: none; margin-top: 1px;
+  background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 11px;
+}
+.chk .box.off { background: transparent; border: 1.5px solid var(--border); }
+.chk .lb { font: 500 13px/1.45 var(--sans); }
+.chk .ds { font: 400 11.5px/1.5 var(--sans); color: var(--text-faint); margin-top: 3px; }
+.qr-box {
+  width: 132px; height: 132px; flex: none; border-radius: 9px;
+  background: repeating-conic-gradient(var(--text) 0 25%, transparent 0 50%) 0 0/10px 10px;
+  border: 7px solid #fff; box-shadow: 0 0 0 1px var(--border);
+}
+.link-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.link-row code {
+  flex: 1; font: 400 11.5px/1 var(--mono); color: var(--accent);
+  background: var(--bg); border: 1px solid var(--border-soft);
+  border-radius: 7px; padding: 10px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gift-note {
+  display: flex; gap: 9px; align-items: flex-start;
+  font: 400 11.5px/1.55 var(--sans); color: var(--text-dim);
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: var(--radius-sm); padding: 11px 13px; margin-top: 12px;
+}
+
+footer.legend {
+  max-width: 700px; margin: 26px auto 0;
+  font: 400 12px/1.7 var(--sans); color: var(--text-faint);
+  border-top: 1px solid var(--border-soft); padding-top: 17px;
+}
+footer.legend b { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<!-- ══════════════ 原型导航（真实程序无此栏） ══════════════ -->
+<div class="proto-bar">
+  <span class="proto-tag">UI 原型 · 非真实程序</span>
+  <div class="proto-tabs">
+    <button class="proto-tab on" data-go="recv-pw">接收端 · 输入密码</button>
+    <button class="proto-tab" data-go="recv-go">接收端 · 传输中</button>
+    <button class="proto-tab" data-go="recv-done">接收端 · 完成</button>
+    <button class="proto-tab" data-go="recv-mobile">接收端 · 手机</button>
+    <button class="proto-tab" data-go="recv-err">接收端 · 出错</button>
+    <button class="proto-tab" data-go="send">发送端 · 终端</button>
+    <button class="proto-tab" data-go="station">发送端 · 图形界面</button>
+    <button class="proto-tab" data-go="station-go">发送端 · 图形界面传输中</button>
+    <button class="proto-tab" data-go="send-share">发送端 · 分享卡</button>
+  </div>
+  <span class="spacer"></span>
+  <button class="theme-btn" id="themeBtn">🌙 深色 / ☀️ 浅色</button>
+</div>
+
+<div class="stage">
+
+<!-- ══════════════ 1. 接收端 · 输入密码 ══════════════ -->
+<div class="screen on" id="s-recv-pw">
+  <p class="hint">接收端是产品唯一的脸。<b>一屏一动作</b>：打开链接后，屏幕上只有一个输入框和一个按钮。</p>
+  <div class="browser">
+    <div class="chrome">
+      <div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <div class="url"><span class="lock">🔒</span>https://192.168.1.5:8443/?k=7f3a…c91</div>
+    </div>
+    <div class="page">
+      <div class="brand">
+        <div class="logo">⚡</div>
+        <div>
+          <div class="brand-name">闪传 <span style="color:var(--text-faint);font-weight:400">Flicker</span></div>
+          <div class="brand-sub">一次性文件传输 · 用完即销毁</div>
+        </div>
+      </div>
+      <div style="height:24px"></div>
+
+      <h2 class="title">对方想给你发 3 个文件</h2>
+      <p class="sub">输入对方告诉你的一次性密码即可开始。传输完成后，密码和链接立即失效。</p>
+
+      <div class="files">
+        <div class="file">
+          <div class="file-ic">🎬</div>
+          <div class="file-meta"><div class="file-name">旅行记录 2024.mp4</div><div class="file-size">2.31 GB</div></div>
+        </div>
+        <div class="file">
+          <div class="file-ic">🖼️</div>
+          <div class="file-meta"><div class="file-name">照片/海边日落.jpg</div><div class="file-size">4.7 MB</div></div>
+        </div>
+        <div class="file">
+          <div class="file-ic">📄</div>
+          <div class="file-meta"><div class="file-name">合同扫描件.pdf</div><div class="file-size">892 KB</div></div>
+        </div>
+        <div class="file-sum"><span>共 3 个文件</span><span><b>2.32 GB</b></span></div>
+      </div>
+
+      <label class="fl" for="pw1">一次性密码</label>
+      <div class="pw-wrap">
+        <input class="pw" id="pw1" type="password" value="correct horse battery" placeholder="输入对方给你的密码">
+        <button class="eye" data-eye="pw1">👁</button>
+      </div>
+      <div class="strength s4"><i></i><i></i><i></i><i></i></div>
+
+      <button class="btn">开始接收</button>
+      <div style="height:12px"></div>
+      <p style="font:400 11.5px/1.5 var(--sans);color:var(--text-faint);text-align:center">
+        密码不会离开你的电脑 —— 它只用来核对双方是否一致
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 2. 接收端 · 传输中 ══════════════ -->
+<div class="screen" id="s-recv-go">
+  <p class="hint">进度页唯一的任务是<b>让人安心</b>：还剩多久、多快、哪个文件。所以数字要大，且必须有"当前文件"这一层。</p>
+  <div class="browser">
+    <div class="chrome">
+      <div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <div class="url"><span class="lock">🔒</span>https://192.168.1.5:8443/?k=7f3a…c91</div>
+    </div>
+    <div class="page">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:22px">
+        <div class="badge"><span class="pulse"></span>传输中 · 已连接</div>
+        <span style="font:500 12px/1 var(--sans);color:var(--text-faint)">端到端加密 · AES-256-GCM</span>
+      </div>
+
+      <div class="stats" style="margin-bottom:13px">
+        <span>总进度 <b>1.24 GB</b> / 2.32 GB</span>
+        <span><b>53%</b></span>
+      </div>
+      <div class="bar"><i style="width:53%"></i></div>
+
+      <div class="cur-file">
+        <div class="top">
+          <div class="file-ic">🎬</div>
+          <div class="nm">旅行记录 2024.mp4</div>
+          <div class="pc">53%</div>
+        </div>
+        <div class="bar thin"><i style="width:53%"></i></div>
+      </div>
+
+      <div class="speed">
+        <div><div class="k">速度</div><div class="v blue">112 MB/s</div></div>
+        <div><div class="k">已用时间</div><div class="v">11 秒</div></div>
+        <div><div class="k">剩余</div><div class="v">约 10 秒</div></div>
+      </div>
+
+      <div style="height:22px"></div>
+      <div class="note">
+        <span class="i">💾</span>
+        <span>正在<b>边收边写入磁盘</b>，不占用内存。已保存位置：<code style="font-family:var(--mono);font-size:11.5px">下载/闪传_2024-06-12/</code></span>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn ghost" style="flex:1">暂停</button>
+        <button class="btn danger" style="flex:1">取消并销毁</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 3. 接收端 · 完成 ══════════════ -->
+<div class="screen" id="s-recv-done">
+  <p class="hint">完成页要同时交付两件事：<b>东西在哪</b>，以及<b>我真的把痕迹清掉了</b>。销毁清单是最好的信任证明。</p>
+  <div class="browser">
+    <div class="chrome">
+      <div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <div class="url"><span class="lock">🔒</span>https://192.168.1.5:8443/?k=7f3a…c91</div>
+    </div>
+    <div class="page center">
+      <div class="big-ic ok">✓</div>
+      <h2 class="title">传输完成</h2>
+      <p class="sub">3 个文件 · 2.32 GB · 用时 21 秒 · 平均 113 MB/s</p>
+
+      <div class="files" style="text-align:left">
+        <div class="file">
+          <div class="file-ic">🎬</div>
+          <div class="file-meta"><div class="file-name">旅行记录 2024.mp4</div>
+            <div class="file-size" style="color:var(--ok)">✓ 校验通过 · SHA-256 一致</div></div>
+        </div>
+        <div class="file">
+          <div class="file-ic">🖼️</div>
+          <div class="file-meta"><div class="file-name">照片/海边日落.jpg</div>
+            <div class="file-size" style="color:var(--ok)">✓ 校验通过 · SHA-256 一致</div></div>
+        </div>
+        <div class="file">
+          <div class="file-ic">📄</div>
+          <div class="file-meta"><div class="file-name">合同扫描件.pdf</div>
+            <div class="file-size" style="color:var(--ok)">✓ 校验通过 · SHA-256 一致</div></div>
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-bottom:18px">
+        <button class="btn" style="flex:1">打开文件夹</button>
+        <button class="btn ghost" style="flex:1">再传一次</button>
+      </div>
+
+      <div class="destroyed">
+<span class="c-dim">会话销毁清单</span>
+<span class="ck">✓</span> 密码与会话密钥已清零
+<span class="ck">✓</span> 发送端服务已关闭
+<span class="ck">✓</span> 一次性链接已失效
+<span class="ck">✓</span> 本页刷新后将无法再次访问</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 4. 接收端 · 手机 ══════════════ -->
+<div class="screen" id="s-recv-mobile">
+  <p class="hint">手机端是<b>未来「电脑→手机」的主要场景</b>。竖屏必须一列到底，按钮要够大，并且明确告诉用户文件存到哪了。</p>
+  <div style="display:flex;gap:26px;justify-content:center;flex-wrap:wrap">
+    <div class="browser" style="max-width:330px">
+      <div class="chrome"><div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+        <div class="url"><span class="lock">🔒</span>flicker.xxx/7f3a</div></div>
+      <div class="page" style="padding:24px 20px">
+        <div class="brand" style="margin-bottom:20px">
+          <div class="logo" style="width:30px;height:30px;font-size:15px">⚡</div>
+          <div><div class="brand-name" style="font-size:16px">闪传</div></div>
+        </div>
+        <div class="badge ok" style="margin-bottom:16px">✓ 已连接 · 局域网直连</div>
+        <h2 class="title" style="font-size:18px">正在接收 2 个文件</h2>
+        <p class="sub" style="font-size:12.5px;margin-bottom:18px">对方：DESKTOP-7K2 · 共 847 MB</p>
+
+        <div class="stats" style="margin-bottom:11px;font-size:11.5px"><span>52%</span><span>441 / 847 MB</span></div>
+        <div class="bar"><i style="width:52%"></i></div>
+
+        <div class="speed" style="gap:12px;margin-top:14px;padding-top:13px">
+          <div><div class="k" style="font-size:10px">速度</div><div class="v" style="font-size:13px;color:var(--accent)">38 MB/s</div></div>
+          <div><div class="k" style="font-size:10px">剩余</div><div class="v" style="font-size:13px">约 11 秒</div></div>
+        </div>
+
+        <div style="height:18px"></div>
+        <div class="note" style="font-size:11.5px;padding:11px 12px">
+          <span class="i">📱</span>
+          <span>完成后会调起系统<b>「存储到…」</b>面板，可存到相册、文件 App 或直接分享给微信。</span>
+        </div>
+        <button class="btn danger" style="padding:13px;font-size:13.5px">取消并销毁</button>
+      </div>
+    </div>
+
+    <div style="max-width:330px;display:flex;flex-direction:column;justify-content:center;gap:16px">
+      <div class="note" style="align-items:flex-start">
+        <span class="i">🔑</span>
+        <span><b style="color:var(--text)">手机作为接收端</b><br>浏览器即全部。用 Web Share API 调起系统分享面板，就能把文件存进相册、文件 App，或直接转发。<b>不需要装 App。</b></span>
+      </div>
+      <div class="note warn" style="align-items:flex-start">
+        <span class="i">⚠️</span>
+        <span><b>手机作为发送端</b>受浏览器限制：无法读取任意路径的文件。方案是「手机上传到接收端」或把本程序包进移动外壳（见设计文档 P4）。</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 5. 接收端 · 出错 ══════════════ -->
+<div class="screen" id="s-recv-err">
+  <p class="hint">错误页必须<b>只给一个下一步动作</b>。安全类错误（密码错、校验失败）要明确说"已中止、什么也没保存"。</p>
+  <div class="browser">
+    <div class="chrome">
+      <div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <div class="url"><span class="lock">🔒</span>https://192.168.1.5:8443/?k=7f3a…c91</div>
+    </div>
+    <div class="page center">
+      <div class="big-ic err">✕</div>
+      <h2 class="title">密码不一致</h2>
+      <p class="sub">双方密码不匹配，握手被拒绝。<b style="color:var(--text)">没有传输任何数据</b>，也没有文件被写入磁盘。</p>
+
+      <div class="note err" style="text-align:left">
+        <span class="i">⚠️</span>
+        <span>已连续失败 <b>2</b> 次。为防止暴力破解，再失败 <b>3</b> 次后本次会话将自动销毁。</span>
+      </div>
+
+      <div class="pw-wrap" style="text-align:left">
+        <input class="pw" type="password" placeholder="重新输入密码" value="">
+        <button class="eye">👁</button>
+      </div>
+      <button class="btn">重试</button>
+      <div style="height:14px"></div>
+      <p style="font:400 11.5px/1.5 var(--sans);color:var(--text-faint)">
+        确认双方输入的是同一个密码（区分大小写与空格）
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 6. 发送端 · 终端 ══════════════ -->
+<div class="screen" id="s-send">
+  <p class="hint">发送端是<b>命令行</b>，所以 UI 就是终端排版：只用框线、颜色和进度条，不引入任何 TUI 依赖。二维码是终端里唯一高效传递长链接的手段。</p>
+  <div class="term">
+    <div class="term-bar"><div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <span class="term-title">闪传 Flicker · Windows PowerShell</span></div>
+    <div class="term-body"><span class="c-dim">PS D:\&gt;</span> <span class="c-bold">node 传输.js send "D:\视频\旅行记录 2024.mp4" "D:\照片" --relay=https://flicker.you.workers.dev</span>
+
+<span class="c-cyan">  ⚡ 闪传 Flicker</span> <span class="c-dim">v0.1.0  ·  一次性文件传输</span>
+
+<span class="c-dim">  ┌ 本次传输 ────────────────────────────────────────────┐</span>
+<span class="c-dim">  │</span>  🎬  旅行记录 2024.mp4                    <span class="c-dim">2.31 GB</span>  <span class="c-dim">│</span>
+<span class="c-dim">  │</span>  📁  照片/ <span class="c-dim">(3 个文件, 1 个子目录)</span>          <span class="c-dim">8.4 MB</span>   <span class="c-dim">│</span>
+<span class="c-dim">  ├──────────────────────────────────────────────────────┤</span>
+<span class="c-dim">  │</span>  共 <span class="c-bold">4 个文件</span>                            <span class="c-bold">2.32 GB</span>   <span class="c-dim">│</span>
+<span class="c-dim">  └──────────────────────────────────────────────────────┘</span>
+
+  <span class="c-dim">正在计算校验值…</span> <span class="c-green">████████████████████</span> <span class="c-bold">100%</span>  <span class="c-dim">(2.3 秒)</span>
+
+<span class="c-dim">  ┌ 一次性密码 ──────────────────────────────────────────┐</span>
+<span class="c-dim">  │</span>                                                      <span class="c-dim">│</span>
+<span class="c-dim">  │</span>     <span class="c-inv"> correct-horse-battery-staple </span>                    <span class="c-dim">│</span>
+<span class="c-dim">  │</span>                                                      <span class="c-dim">│</span>
+<span class="c-dim">  │</span>  <span class="c-dim">已随机生成（4 词 · 约 52 bit）。回车接受，或直接输入自定</span>  <span class="c-dim">│</span>
+<span class="c-dim">  │</span>  <span class="c-dim">义密码。对方需要在浏览器里输入完全相同的密码。</span>        <span class="c-dim">│</span>
+<span class="c-dim">  └──────────────────────────────────────────────────────┘</span>
+
+  <span class="c-blue">?</span> 密码 <span class="c-dim">[回车使用上面这个]</span> <span class="c-white">▏</span>
+
+  <span class="c-dim">请再输入一次以确认（防止手误）：</span> <span class="c-white">▏</span>
+
+  <span class="c-green">✓ 密码已确认</span>
+
+<span class="c-dim">  ┌ 让对方打开这个链接 ──────────────────────────────────┐</span>
+<span class="c-dim">  │</span>                                                      <span class="c-dim">│</span>
+<span class="c-dim">  │</span>  <span class="c-blue">https://flicker.you.workers.dev/#/7f3a9c1e4b8d2a60</span>   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>                                                      <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█████████████████████████████</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█ ▄▄▄▄▄ █▀▀█▄▀▄█ ▄▄▄▄▄ █</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█ █   █ █▀ ▄▀▀▄ █   █ █</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█ █▄▄▄█ █▀▀▄▀█▀ █▄▄▄█ █</span>   <span class="c-dim">扫码直接打开</span>       <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█▄▄▄▄▄▄▄█ ▀▄█▀█ ▄▄▄▄▄▄▄█</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█ ▀▀█▀▀▄▀ █▄▀▄▀▀▀▄▀▀█▀▄█</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>      <span class="c-white">█▄▄▄▄▄▄▄█▄█▄█▄▄█▄█▄█▄█▄█</span>                   <span class="c-dim">│</span>
+<span class="c-dim">  │</span>                                                      <span class="c-dim">│</span>
+<span class="c-dim">  │</span>  <span class="c-dim">链接含一次性令牌，首次访问后失效。请通过可信渠道发送。</span> <span class="c-dim">│</span>
+<span class="c-dim">  └──────────────────────────────────────────────────────┘</span>
+
+  <span class="c-yellow">⏳</span> 等待对方连接… <span class="c-dim">(超时 10:00，之后自动销毁)</span>
+
+  <span class="c-green">✓ 对方已连接</span>  <span class="c-dim">192.168.1.6 · Chrome 126</span>
+  <span class="c-green">✓ 密码核对通过</span>  <span class="c-dim">双向认证完成 · 密钥已协商</span>
+
+  <span class="c-bold">  旅行记录 2024.mp4</span>
+  <span class="c-cyan">  ████████████████████████░░░░░░░░░░░░░░░░░░░░</span>  <span class="c-bold"> 61%</span>
+  <span class="c-dim">  1.41 GB / 2.31 GB   ·   148 MB/s   ·   剩余约 6 秒</span>
+
+  <span class="c-dim">  按 Ctrl+C 立即中止并销毁全部密钥</span>
+</div>
+  </div>
+</div>
+
+<!-- ══════════════ 7. 发送端 · 分享卡 ══════════════ -->
+<div class="screen" id="s-send-share">
+  <p class="hint">如果终端里二维码显示错乱（老终端、字体不支持），程序应能<b>导出一张图片</b>。这也方便直接用微信发给对方。</p>
+  <div style="display:flex;gap:26px;justify-content:center;flex-wrap:wrap;align-items:flex-start">
+    <div style="background:#fff;color:#111;border-radius:16px;padding:26px 24px;width:340px;box-shadow:var(--shadow);font-family:var(--sans)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+        <div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(140deg,#4d9fff,#7b5cff);display:grid;place-items:center;font-size:17px">⚡</div>
+        <div>
+          <div style="font-weight:650;font-size:17px;letter-spacing:-.015em">闪传 Flicker</div>
+          <div style="font-size:11px;color:#777">一次性文件传输</div>
+        </div>
+      </div>
+      <div style="text-align:center;padding:14px 0;border-top:1px solid #eee;border-bottom:1px solid #eee">
+        <div style="width:170px;height:170px;margin:0 auto;background:
+          repeating-conic-gradient(#111 0 25%, #fff 0 50%) 0 0/13px 13px;
+          border:9px solid #fff;box-shadow:0 0 0 1px #ddd;border-radius:6px"></div>
+        <div style="font-size:11px;color:#888;margin-top:11px">扫码打开接收页</div>
+      </div>
+      <div style="margin-top:16px;font-size:12.5px;line-height:1.7">
+        <div style="color:#666">一次性密码</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:15px;margin-top:5px;background:#f5f6f8;padding:9px 11px;border-radius:7px;text-align:center;letter-spacing:.03em">
+          correct-horse-battery-staple</div>
+      </div>
+      <div style="margin-top:14px;font-size:11px;color:#999;line-height:1.6">
+        传输完成后链接与密码立即失效 · 请通过可信渠道发送
+      </div>
+    </div>
+
+    <div style="max-width:330px;display:flex;flex-direction:column;gap:16px">
+      <div class="note" style="align-items:flex-start">
+        <span class="i">🖼️</span>
+        <span><b style="color:var(--text)">导出为 PNG</b><br>终端二维码在部分 Windows 控制台会因字体/编码显示错乱。备选：<code style="font-family:var(--mono);font-size:11.5px">--card=share.png</code> 直接生成图片，可微信发送、可打印。</span>
+      </div>
+      <div class="note" style="align-items:flex-start">
+        <span class="i">📋</span>
+        <span><b style="color:var(--text)">纯文本模式</b><br><code style="font-family:var(--mono);font-size:11.5px">--no-qr</code> 只输出文字链接+密码，适合粘贴到聊天窗口或远程 SSH 会话。</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 8. 站点页 · 图形界面（空闲） ══════════════ -->
+<div class="screen" id="s-station">
+  <p class="hint">图形界面不是"发送界面"，而是<b>站点页</b> —— 既能发，也能收。因为装了程序的人随时可能有人要发东西给他，<b>接收是一等公民</b>。</p>
+  <div class="station">
+    <div class="st-head">
+      <div class="logo" style="width:30px;height:30px;font-size:15px">⚡</div>
+      <div>
+        <div class="brand-name" style="font-size:16px">闪传 Flicker</div>
+        <div class="brand-sub" style="margin-top:2px">本机 192.168.1.5 · 同一网络内可直连</div>
+      </div>
+      <span class="spacer"></span>
+      <div class="badge"><span class="pulse" style="background:var(--text-faint)"></span>空闲中</div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h">我要发文件</div>
+      <div class="drop">
+        <div class="ic">📥</div>
+        <div class="t1">把文件或文件夹拖到这里</div>
+        <div class="t2">也可以直接选整个文件夹，内部结构会一起传过去</div>
+        <div class="drop-btns">
+          <button class="mini">选择文件</button>
+          <button class="mini">选择文件夹</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h">有人要发给我</div>
+      <div class="pw-inline">
+        <input type="password" placeholder="输入对方给的一次性密码">
+        <button class="mini" style="background:var(--accent);color:#fff;border-color:var(--accent);padding:12px 18px">开始接收</button>
+      </div>
+      <div class="gift-note" style="background:transparent;border-color:var(--border-soft)">
+        <span>💡</span>
+        <span>对方发的链接直接用浏览器打开也行 —— 但<b>用这个界面接收，大文件会边收边写盘</b>，不受浏览器内存限制。</span>
+      </div>
+    </div>
+
+    <div class="sec" style="background:var(--bg);display:flex;gap:18px;align-items:center">
+      <div style="flex:1">
+        <div style="font:500 12px/1 var(--sans);color:var(--text-faint);margin-bottom:7px">当前浏览器</div>
+        <div style="font:600 13px/1 var(--sans)">Edge 155 <span style="color:var(--ok);font-weight:500">· 支持大文件流式写盘</span></div>
+      </div>
+      <div style="flex:1">
+        <div style="font:500 12px/1 var(--sans);color:var(--text-faint);margin-bottom:7px">本机地址</div>
+        <div style="font:600 13px/1 var(--mono)">192.168.1.5</div>
+      </div>
+      <button class="mini">安装为桌面应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 9. 站点页 · 图形界面（已选文件） ══════════════ -->
+<div class="screen" id="s-station-go">
+  <p class="hint">选好文件后，<b>密码、链接、二维码必须在同一屏</b> —— 用户接下来要做的就是"把这两样东西给对方"，中间不该再翻页。</p>
+  <div class="station">
+    <div class="st-head">
+      <div class="logo" style="width:30px;height:30px;font-size:15px">⚡</div>
+      <div><div class="brand-name" style="font-size:16px">闪传 Flicker</div></div>
+      <span class="spacer"></span>
+      <div class="badge ok"><span class="pulse"></span>等待对方连接</div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h">本次传输 · 4 个文件 · 2.32 GB</div>
+      <div class="files" style="margin:0">
+        <div class="file"><div class="file-ic">🎬</div><div class="file-meta"><div class="file-name">旅行记录 2024.mp4</div><div class="file-size">2.31 GB</div></div></div>
+        <div class="file"><div class="file-ic">🖼️</div><div class="file-meta"><div class="file-name">照片/海边日落.jpg</div><div class="file-size">4.7 MB</div></div></div>
+        <div class="file"><div class="file-ic">📄</div><div class="file-meta"><div class="file-name">合同扫描件.pdf</div><div class="file-size">892 KB</div></div></div>
+        <div class="file"><div class="file-ic">📁</div><div class="file-meta"><div class="file-name">资料/（2 个文件）</div><div class="file-size">6.1 MB</div></div></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h">一次性密码</div>
+      <div class="pw-inline">
+        <input type="text" value="correct-horse-battery-staple" readonly>
+        <button class="mini">复制</button>
+        <button class="mini">换一个</button>
+      </div>
+      <div style="font:400 11.5px/1.6 var(--sans);color:var(--text-faint);margin-top:9px">
+        自动生成，好念好打。传输完成后立即失效。
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h">传输选项</div>
+      <label class="chk">
+        <span class="box">✓</span>
+        <span><span class="lb">顺便把「闪传」也送给对方</span>
+        <span class="ds">对方收到后也能把文件发给别人，不用再去下载。约 18 MB。</span></span>
+      </label>
+      <label class="chk">
+        <span class="box off"></span>
+        <span><span class="lb">限制传输速度</span>
+        <span class="ds">避免占满公司或家里的网络带宽。</span></span>
+      </label>
+    </div>
+
+    <div class="sec" style="display:flex;gap:22px;align-items:center">
+      <div class="qr-box"></div>
+      <div style="flex:1;min-width:0">
+        <div class="sec-h" style="margin-bottom:10px">让对方扫码或打开链接</div>
+        <div class="link-row"><code>https://192.168.1.5:8443/?k=7f3a9c1e4b8d</code><button class="mini">复制</button></div>
+        <div style="font:400 11.5px/1.6 var(--sans);color:var(--text-faint)">
+          链接含一次性令牌，首次访问后失效。<b style="color:var(--warn)">建议链接和密码分开发送</b>（比如链接发微信、密码打电话说）。
+        </div>
+      </div>
+    </div>
+
+    <div class="sec" style="background:var(--bg);display:flex;align-items:center;gap:12px">
+      <span style="font-size:15px">⏳</span>
+      <span style="font:500 13px/1.5 var(--sans)">等待对方连接… <span style="color:var(--text-faint);font-weight:400">超时 10:00 后自动销毁</span></span>
+      <span class="spacer"></span>
+      <button class="mini" style="color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,transparent)">立即销毁</button>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<footer class="legend" style="margin-left:auto;margin-right:auto">
+  <b>设计原则</b> · ① 接收端一屏一动作；② 密码永不出本机，界面上要说出来；③ 销毁过程要可见，它是最强的信任证明；④ 终端里二维码是刚需；⑤ 手机端不是缩小版桌面，是独立场景。
+</footer>
+
+<script>
+// 标签切换
+document.querySelectorAll('.proto-tab').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    document.querySelectorAll('.proto-tab').forEach(function (t) { t.classList.remove('on'); });
+    document.querySelectorAll('.screen').forEach(function (s) { s.classList.remove('on'); });
+    tab.classList.add('on');
+    document.getElementById('s-' + tab.dataset.go).classList.add('on');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+});
+
+// 主题切换
+document.getElementById('themeBtn').addEventListener('click', function () {
+  var root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+});
+
+// 密码显示切换
+document.querySelectorAll('.eye').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var input = btn.dataset.eye ? document.getElementById(btn.dataset.eye) : btn.parentElement.querySelector('input');
+    if (input) input.type = input.type === 'password' ? 'text' : 'password';
+  });
+});
+</script>
+</body>
+</html>

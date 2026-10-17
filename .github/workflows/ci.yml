@@ -1,0 +1,220 @@
+# 三平台 CI。
+#
+# 为什么必须有它（而不是本地跑跑就算）：
+#   ① macOS / Linux **至今没有实测过**。没有 CI，每次发版都是"我这儿能跑"。
+#   ② 测试选择逻辑（哪些文件在哪些平台能跑）写在 gen/test-plan.mjs 里，
+#      本地与 CI 用的是**同一份判断** —— 不必等推上去才发现某平台跑不了。
+#      本地可以先跑 `node gen/test-plan.mjs` 预览。
+#   ③ 单文件产物必须**在目标平台上构建**（SEA 不支持交叉编译），
+#      所以构建也得进矩阵，否则三平台产物的可用性永远没人验。
+#
+# ⚠️ 平台能力边界写在 gen/test-plan.mjs，**不在这里写死**。
+#    证书**生成**从 2026-10 起是纯 JS（全平台同一份代码，判据是真实 TLS 握手），
+#    所以三平台跑的是**同一套测试文件**（有哪些由 `gen/test-plan.mjs` 决定，
+#    这里不写死数字 —— 写死的数字迟早会过期）；只有"装进系统证书库"那几个用例
+#    在文件内部自gate（`{ skipStore }`，见 test/trust.test.js）。
+#    `node gen/test-plan.mjs --check` 会复核这份判断有没有过时 ——
+#    它防的是"某个平台短板已经补上、清单里却还挡着"这种静默丢覆盖率的情况。
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # 一个平台挂了，别把另外两个也取消 —— 要看清全貌
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 环境
+        run: node --version
+
+      - name: 预览本平台要跑哪些测试
+        run: node gen/test-plan.mjs
+
+      # 防"平台专属清单过时"：某个平台短板补上了、清单里却还挡着那些文件，
+      # 结果用例在别的平台上永远不跑而 CI 依然是绿的。
+      - name: 平台专属清单没过时
+        run: node gen/test-plan.mjs --check
+
+      # 零运行时依赖是项目的核心承诺之一，用 CI 守住它。
+      # 断言放在脚本文件里而不是内联 shell —— 内联的嵌套引号跨平台很容易出错。
+      - name: 零运行时依赖
+        run: node gen/check-no-deps.mjs
+
+      # 行尾检查也要在 CI 里跑：.cmd 被转成 LF 时 Windows 上会静默失效
+      # （症状是"装了 Node 却让你去下载 Node"），而 Linux/macOS 上完全看不出来。
+      - name: 行尾与 BOM 符合约定
+        run: node gen/check-line-endings.mjs
+
+      # 界面文案改了但忘了重新内联的话，页面上还是旧文案 —— 中文界面看不出来
+      # （因为缺词会退回中文），只有英文用户会发现。所以 CI 必须守住。
+      - name: i18n 内联段是最新的
+        run: node gen/inline-i18n.mjs --check
+
+      # PWA 图标/manifest 改了不重新内联，页面上的图标就是旧的 ——
+      # 而"装到主屏幕"这件事只在手机上看得出来，最容易漏。
+      - name: PWA 内联段是最新的
+        run: node gen/inline-pwa.mjs --check
+
+      # 路径规则（PROTOCOL.md §6.2）改完不重新内联，页面用的还是旧规则 ——
+      # 而**真正决定文件落到用户磁盘上叫什么的是页面那一份**。
+      # 两边不一致的后果不是"少一层防护"，是静默覆盖丢文件。
+      - name: 路径规则内联段是最新的
+        run: node gen/inline-path-rules.mjs --check
+
+      # 接收端页面在两处被用到：局域网直连读 web/receiver.html，
+      # 跨网络时中继发的是构建产物 relay/page.generated.js。
+      # 只改页面、忘了重跑生成脚本，症状是"局域网是新版、跨网络还是旧版"。
+      - name: 中继页面与源文件一致
+        run: node gen/gen-relay-page.mjs --check
+
+      # 页面插件只能**构建期内联**（页面必须自包含、CSP 不许外部脚本），
+      # 所以"启用了哪些插件"是构建输入的一部分：改了清单或插件文件而不重跑内联，
+      # 症状是"清单里写着启用了、对方拿到的页面里其实没有"。
+      # 顺带，构建期还会把插件的 apiVersion / 形状 / 纯浏览器 JS 都校验掉。
+      - name: 页面插件内联段与清单一致
+        run: node gen/inline-plugins.mjs --check
+
+      # 手机上传页的协议内核也是构建期内联的（`web/phone-core.js` → `web/phone.html`）。
+      # 内联段与源文件不一致 = 手机上跑的是旧的密钥派生/加密封装 ——
+      # 表现是"密码不一致"或"块校验失败"，离原因很远。
+      - name: 手机页协议内核内联段是最新的
+        run: node gen/inline-phone.mjs --check
+
+      # 文档里写着程序不认的参数（2026-10 实测有 5 个：--gui、--quiet、--lang、
+      # --connect、--out），用户照着敲只会以为是自己抄错了。
+      # 这一条把"参数表里的 `--xxx`"与"bin/flicker.js 真正读到的 flag"摆在一起比。
+      - name: 文档里的命令行参数程序都认
+        run: node gen/check-doc-flags.mjs
+
+      # 我们建的临时目录前缀必须登记在册（gen/tmp.mjs 的 PREFIXES）——
+      # 否则事后没有任何东西能安全地认领它们，只能攒在用户的 %TEMP% 里
+      # （2026-10 实测攒到 2.8 GB / 6717 个文件才被发现）。
+      - name: 临时目录前缀都登记在册
+        run: node gen/check-temp-dirs.mjs
+
+      # ⚠️ 赠品源码包会跟着 exe 一起发出去，里面**绝不能**有凭据或个人信息。
+      # 2026-10 用户要求检查时发现：`relay/.wrangler/cache/wrangler-account.json`
+      # （含 Cloudflare 账号 id 与邮箱）**曾经真的在包里**，也因此进了当时的产物。
+      - name: 赠品源码包里没有凭据与个人信息
+        run: node gen/check-pack-pii.mjs
+
+      # 文档是两份（中文 `中文文档/`、英文 `docs/`），天生会漂移：
+      # 中文改了、英文忘了跟，谁也不会发现 —— 没人会同时读两份。
+      # 所以让机器守"文件名一一对应 + 结构（标题/代码块/表格行）一致"。
+      - name: 中英文文档一一对应且结构一致
+        run: node gen/check-doc-pairs.mjs
+
+      # §6.1 曾经整节写错（文档上的字段名实现里一个都没有，照它写客户端会解析失败）。
+      # 这一条把**真实代码生成的清单**和文档摆在一起逐字段比：
+      # 字段集合、顺序、类型、字段表覆盖情况，以及"旧文档字段"是否真的不在实现里。
+      - name: PROTOCOL §6.1 的清单字段与实现一致
+        run: node gen/check-manifest-doc.mjs
+
+      # §7R 是"手机 → 电脑"那条路（/up/*）的线上契约，2026-10 才补上。
+      # 它与 §6.1 一样属于"文档说了、实现没有（或反过来）本机测试全绿"的类别：
+      # 端点表与成功响应的字段/类型都逐项比 —— 端点是拿 RECV_ROUTE_TABLE（单一来源）
+      # 加上**真请求一遍**验的，响应形状是起一个真服务走完六个端点收下来的。
+      - name: PROTOCOL §7R 的接收模式端点与实现一致
+        run: node gen/check-recv-protocol-doc.mjs
+
+      # §7.1 的端点表曾经整张写错：路径少了 `/api/` 前缀、`/auth` 实际是两个端点、
+      # `/api/manifest` 与 `/api/health` 根本没进表；§7.2 说 SID 走请求头，而发起方
+      # 服务实际读 `?sid=`；§7.3 的响应头与状态码也全不对。照那张表写客户端会 404。
+      # 这条判据把端点集合**从源码抠出来**、再起真服务逐条请求一遍。
+      - name: PROTOCOL §7 的发起方端点与实现一致
+        run: node gen/check-send-protocol-doc.mjs
+
+      # 测试的收尾钩子若用 `.catch` 接清理函数，遇到"返回 undefined 的清理"
+      # （同步箭头函数就是这样）会抛 TypeError，于是**后面的清理一个都不跑**：
+      # 服务不关、子进程攥着 stdout 管道，node 测试进程永不退出 ——
+      # 表象只是"卡住"（2026-10 实测：三条用例全绿，进程挂着不走，定位花了十几分钟）。
+      - name: 测试收尾写法不得吞掉后续清理
+        run: node gen/check-test-cleanup.mjs
+
+      # 赠品里的 `.fkz` 源码包说明写的是"源码 + 全部文档，可以自己看、自己改、自己构建"。
+      # 它从前按一份**手写清单**打包，而那份清单少了 src/run.js、src/gui.js、src/assets.js……
+      # 实测：解开后跑 `node bin/flicker.js --version` 第一句就 ERR_MODULE_NOT_FOUND，
+      # 也就是**对方收到的是跑不起来的半份源码**。现在清单是遍历式的，
+      # 这台判据既查"该在的都在、不该在的都没在"，也会**真的解开跑一次**。
+      - name: 赠品源码包完整且能跑起来
+        run: node gen/check-source-pack.mjs
+
+      # 插件的契约写在三处：src/plugin/events.js 的表、中文文档/插件.md、docs/插件.md。
+      # 文档里写着一个不存在的事件，插件作者照着写就会当场被拒 —— 他会以为是自己的错。
+      - name: 插件文档与事件表一致
+        run: node gen/check-plugin-doc.mjs
+
+      # 同一批"插件还没做的事"写在两处（插件.md §11 给作者看、路线图 §十三 给接手的人看）。
+      # 2026-10 的真实状况：前者 6 条、后者搜"插件"命中 0 —— 一个已发布的功能不在
+      # "进度的唯一权威"里。这条判据要求两处的缺口**逐行同名同序**（只比名字，
+      # 现状列各写各的），免得两份清单各自漂。
+      - name: 插件缺口清单两处一致
+        run: node gen/check-plugin-gaps.mjs
+
+      # 用 gen/run-tests.mjs 而不是在 workflow 里拼命令替换：
+      # 那个脚本**本地也能跑**（`npm test` 就是它），所以 CI 里跑的东西
+      # 和开发者本地跑的是同一份逻辑，不会出现"只有 CI 上才这样"的意外。
+      - name: 跑测试（串行）
+        run: node gen/run-tests.mjs
+
+      - name: 构建单文件产物（SEA 必须在本平台构建）
+        run: node gen/build-sea.mjs
+
+      - name: 验证产物真的能跑
+        run: node gen/smoke-sea.mjs
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: flicker-${{ matrix.os }}
+          path: dist/flicker-*
+          if-no-files-found: error
+          retention-days: 7
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 文档结构体检
+        run: node _lab/check-docs.mjs
+      - name: 文档里的本地链接必须真实存在
+        run: node gen/check-doc-links.mjs
+
+      # 手册 §4.2 那幅界面示意图曾经画错：标题写成「有人要发给我」（界面上是
+      # 「或者，让别人发给我」），还画了一个根本不存在的"在这一页输密码"的框
+      # （密码是手机上输入的）。用户照着手册找那个框，只会以为程序坏了。
+      # 这条判据把图里的每一段文字与 web/i18n-strings.mjs 的文案比：
+      # 界面上没有的句子，图里就不许有。
+      - name: 手册里的界面示意图与真实界面一致
+        run: node gen/check-manual-ui.mjs
+
+      # ⚠️ 它比的是"`npm run check` 里的每条命令是否都在本文件里出现"。
+      # 本地那道闸有 23 条判据，云端这道闸是**手写**的一份清单 —— 往 package.json
+      # 里加一条却忘了同步这里，那条判据就只在你自己的机器上生效，而"CI 绿"
+      # 会被当成"全都验过了"（这个项目在这类"以为验过了"上栽过好几次）。
+      # 有了这条判据，"谁都不必记得同步"。
+      - name: CI 与 npm run check 跑的是同一批判据
+        run: node gen/check-ci-parity.mjs

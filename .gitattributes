@@ -1,0 +1,29 @@
+# 行尾由仓库说了算，不由每台机器的 core.autocrlf 决定
+# ==================================================
+#
+# 为什么必须有这个文件：`gen/check-line-endings.mjs` 规定了三类硬约束 ——
+#   · `.cmd` / `.bat` 必须 **CRLF**（`cmd.exe` 的 `for /f` 遇到 LF 会解析失败，
+#     `启动.cmd` 就因为这个毛病把版本号读成空、误报"Node 太旧"）
+#   · `.sh` / `.command` 必须 **LF**（CRLF 会让 shebang 变成 `/bin/sh^M`）
+#   · 所有文本文件不许有 BOM
+# 而 Git for Windows 的安装默认值常常是 `core.autocrlf=true` —— 它会在**检出**时
+# 把 `.sh` 也转成 CRLF，正好把上面第二条弄坏。所以规则写进仓库，任何机器、任何
+# autocrlf 设置下检出的结果都一样。
+
+* text=auto eol=lf
+
+# cmd.exe 的命令脚本要 CRLF，不然会静默解析失败（踩过，见 check-line-endings.mjs）
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Unix 的启动脚本要 LF
+*.sh text eol=lf
+*.command text eol=lf
+
+# 二进制：不要做任何行尾转换（Git 通常能自己识别，这里写明是为了不依赖启发式）
+*.exe binary
+*.zip binary
+*.fkz binary
+*.png binary
+*.jpg binary
+*.ico binary

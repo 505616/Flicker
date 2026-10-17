@@ -1,0 +1,5 @@
+{
+  "_comment": "页面插件清单：只认这里列出的插件（绝不自动发现）。改完要重跑 node gen/inline-plugins.mjs，再跑 node gen/gen-relay-page.mjs 并重新构建产物。空清单表示页面里不带任何插件代码，行为与从前一致。",
+  "_usage": "把插件路径写进 plugins 数组，例如 [\"examples/plugins/page-hello.mjs\"]；路径相对仓库根。",
+  "plugins": []
+}

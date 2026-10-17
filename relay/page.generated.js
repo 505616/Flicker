@@ -1,0 +1,2334 @@
+/**
+ * ⚠️ 构建产物，请勿手工编辑。
+ * 由 gen/gen-relay-page.mjs 从 web/receiver.html 生成。
+ *
+ * 源文件 SHA-256（前 16 位）: c3ade5af0461ed1e
+ * 页面大小: 156.6 KB
+ *
+ * 改页面请改 web/receiver.html，然后重新运行：node gen/gen-relay-page.mjs
+ */
+export const RECEIVER_HTML = `<!DOCTYPE html>
+<html lang="zh-CN" data-i18n-title="recv.title">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>闪传 Flicker · 接收文件</title>
+<style>
+/* ============================================================
+   闪传 Flicker — 接收端
+   设计令牌与 ui-prototype.html 完全一致，不要另起一套。
+   本页面必须：单文件、零外部请求、零 CDN（局域网可能没有外网）
+   ============================================================ */
+:root {
+  --bg:#0b0e14; --bg-elev:#121722; --bg-elev-2:#1a2130;
+  --border:#232c3d; --border-soft:#1b2331;
+  --text:#e6ebf5; --text-dim:#8c9ab4; --text-faint:#5b6883;
+  --accent:#4d9fff; --accent-soft:rgba(77,159,255,.12);
+  --ok:#2fbf71; --warn:#f0a83c; --danger:#ff5f57;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  --radius:14px; --radius-sm:9px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:#f4f6fa; --bg-elev:#fff; --bg-elev-2:#eef1f7;
+    --border:#dde3ed; --border-soft:#e8edf5;
+    --text:#131a26; --text-dim:#5d6b83; --text-faint:#8b98ae;
+    --accent:#1a73e8; --accent-soft:rgba(26,115,232,.08);
+    --ok:#12915a; --warn:#b8720d; --danger:#d93a30;
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;
+  -webkit-font-smoothing:antialiased;display:flex;justify-content:center;align-items:center;padding:28px 16px}
+/* ⚠️ 卡片宽度随屏幕走，并**垂直居中**。
+   写死 520px 时在 1920 屏上两边各空掉 700px，而 justify-content 只管水平 ——
+   所有多余的竖向空间都堆在卡片下面，整页看着像"内容飘在左上角"。
+   接收端是对方唯一看到的界面，这一眼很要紧。 */
+.wrap{width:100%;max-width:520px}
+@media (min-width:1200px){ .wrap{max-width:640px} }
+@media (min-width:1600px){ .wrap{max-width:720px} }
+.card{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:0 18px 50px -12px rgba(0,0,0,.45);overflow:hidden}
+.inner{padding:30px}
+@media(max-width:540px){.inner{padding:22px 18px}}
+.brand{display:flex;align-items:center;gap:11px}
+.logo{width:34px;height:34px;border-radius:9px;flex:none;display:grid;place-items:center;font-size:17px;
+  background:linear-gradient(140deg,var(--accent),#7b5cff);box-shadow:0 5px 16px -5px var(--accent)}
+.brand-name{font:650 19px/1 var(--sans);letter-spacing:-.015em}
+.brand-sub{font:400 12px/1.4 var(--sans);color:var(--text-faint);margin-top:3px}
+/* 语言切换：靠右、低调，但始终可点。
+   按钮文字由 i18n 运行时填（显示"另一种语言"的名字）—— 所以这里只能定样式，
+   不能写死文案，否则切到英文后按钮上还是中文。 */
+/* 与发送端同一套观感：这个按钮要显眼 —— 需要它的人往往正是看不懂界面的人。
+   图标走 ::before，因为运行时直接 set textContent（放进去会被冲掉）。 */
+.lang-switch{margin-left:auto;flex:none;display:inline-flex;align-items:center;gap:6px;
+  font:600 12.5px/1 var(--sans);color:var(--accent);
+  background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  border-radius:999px;padding:7px 12px;cursor:pointer;
+  transition:color .15s,border-color .15s,background .15s}
+.lang-switch::before{content:'🌐';font-size:13px;line-height:1}
+.lang-switch::after{content:'▾';font-size:9px;opacity:.75}
+.lang-switch:hover{color:#fff;background:var(--accent);border-color:var(--accent);filter:brightness(1.05)}
+h2{font:600 21px/1.35 var(--sans);letter-spacing:-.018em;margin:24px 0 7px}
+p.sub{font:400 13.5px/1.6 var(--sans);color:var(--text-dim);margin-bottom:20px}
+label.fl{display:block;font:600 11.5px/1 var(--sans);letter-spacing:.04em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:9px}
+.pw-wrap{position:relative;margin-bottom:14px}
+input.pw{width:100%;font:500 15px/1 var(--mono);letter-spacing:.06em;color:var(--text);background:var(--bg);
+  border:1px solid var(--border);border-radius:var(--radius-sm);padding:15px 46px 15px 15px;outline:none;
+  transition:border-color .16s,box-shadow .16s}
+input.pw:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+input.pw::placeholder{color:var(--text-faint);letter-spacing:0;font-weight:400}
+.eye{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;
+  cursor:pointer;color:var(--text-faint);font-size:15px;padding:8px 11px;border-radius:7px}
+.eye:hover{color:var(--text)}
+.btn{width:100%;font:600 14.5px/1 var(--sans);color:#fff;background:var(--accent);border:0;
+  border-radius:var(--radius-sm);padding:15px;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;gap:8px;transition:filter .16s,transform .1s}
+.btn:hover{filter:brightness(1.09)}
+.btn:active{transform:scale(.99)}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.btn.ghost{background:transparent;color:var(--text-dim);border:1px solid var(--border)}
+.btn.ghost:hover{color:var(--text);background:var(--bg-elev-2);filter:none}
+.btn.danger{background:transparent;color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 35%,transparent)}
+.btn-row{display:flex;gap:10px}
+.files{border:1px solid var(--border-soft);border-radius:var(--radius-sm);overflow:hidden;margin-bottom:18px}
+.file{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg);
+  border-bottom:1px solid var(--border-soft)}
+.file:last-child{border-bottom:0}
+.file-ic{width:30px;height:30px;border-radius:7px;flex:none;display:grid;place-items:center;
+  font-size:14px;background:var(--bg-elev-2)}
+.file-meta{flex:1;min-width:0}
+.file-name{font:500 13.5px/1.35 var(--sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-size{font:400 11.5px/1 var(--mono);color:var(--text-faint);margin-top:3px}
+.file-sum{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;
+  background:var(--bg-elev-2);font:500 12px/1 var(--sans);color:var(--text-dim)}
+.file-sum b{color:var(--text);font-weight:600}
+/* 「分享 / 保存到…」按钮：只在完成屏上、且内容还在内存里时出现。
+   手机上它是最有用的那个动作 —— 存相册、发微信都靠系统分享面板。 */
+.mini.share{flex:none;font:600 11.5px/1 var(--sans);color:var(--text-dim);background:transparent;
+  border:1px solid var(--border);border-radius:999px;padding:7px 11px;cursor:pointer;
+  transition:color .15s,border-color .15s,background .15s}
+.mini.share:hover{color:var(--text);border-color:var(--text-faint);background:var(--bg-elev-2)}
+.bar{height:7px;border-radius:4px;background:var(--bg-elev-2);overflow:hidden;margin-bottom:11px}
+.bar>i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),#7b5cff);
+  transition:width .35s cubic-bezier(.4,0,.2,1)}
+.bar.thin{height:4px;margin:0}
+.stats{display:flex;justify-content:space-between;font:400 12.5px/1 var(--mono);color:var(--text-dim)}
+.stats b{color:var(--text);font-weight:600}
+.cur-file{padding:14px;border:1px solid var(--border-soft);border-radius:var(--radius-sm);
+  background:var(--bg);margin-bottom:15px}
+.cur-file .top{display:flex;align-items:center;gap:11px;margin-bottom:12px}
+.cur-file .nm{flex:1;min-width:0;font:500 13.5px/1.35 var(--sans);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.cur-file .pc{font:600 13px/1 var(--mono);color:var(--accent);flex:none}
+.speed{display:flex;gap:20px;margin-top:16px;padding-top:15px;border-top:1px solid var(--border-soft)}
+.speed>div{flex:1}
+.speed .k{font:500 10.5px/1 var(--sans);letter-spacing:.05em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:6px}
+.speed .v{font:600 15px/1 var(--mono)}
+.speed .v.blue{color:var(--accent)}
+.badge{display:inline-flex;align-items:center;gap:7px;font:500 12px/1 var(--sans);padding:6px 11px;
+  border-radius:999px;background:var(--bg-elev-2);color:var(--text-dim);border:1px solid var(--border-soft)}
+.badge.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 11%,transparent);
+  border-color:color-mix(in srgb,var(--ok) 26%,transparent)}
+.badge.err{color:var(--danger);background:color-mix(in srgb,var(--danger) 11%,transparent);
+  border-color:color-mix(in srgb,var(--danger) 26%,transparent)}
+.pulse{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pl 1.5s ease-in-out infinite}
+@keyframes pl{0%,100%{opacity:1}50%{opacity:.3}}
+.big-ic{width:62px;height:62px;border-radius:50%;margin:0 auto 20px;display:grid;place-items:center;font-size:29px}
+.big-ic.ok{background:color-mix(in srgb,var(--ok) 13%,transparent);color:var(--ok);
+  box-shadow:0 0 0 9px color-mix(in srgb,var(--ok) 6%,transparent)}
+.big-ic.err{background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger);
+  box-shadow:0 0 0 9px color-mix(in srgb,var(--danger) 6%,transparent)}
+.center{text-align:center}
+.note{display:flex;gap:10px;align-items:flex-start;font:400 12.5px/1.55 var(--sans);color:var(--text-dim);
+  background:var(--bg-elev-2);border:1px solid var(--border-soft);border-radius:var(--radius-sm);
+  padding:12px 14px;margin-bottom:16px;text-align:left}
+.note.warn{background:color-mix(in srgb,var(--warn) 8%,transparent);
+  border-color:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.note.err{background:color-mix(in srgb,var(--danger) 8%,transparent);
+  border-color:color-mix(in srgb,var(--danger) 22%,transparent);color:var(--danger)}
+.note .i{flex:none;font-size:14px;line-height:1.3}
+.destroyed{font:400 12px/1.6 var(--mono);color:var(--text-faint);background:var(--bg);
+  border:1px dashed var(--border);border-radius:var(--radius-sm);padding:13px 15px;text-align:left;white-space:pre-line}
+.destroyed .ck{color:var(--ok)}
+.hide{display:none!important}
+.foot{font:400 11.5px/1.5 var(--sans);color:var(--text-faint);text-align:center;margin-top:12px}
+.spin{width:15px;height:15px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;
+  border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+code{font-family:var(--mono);font-size:11.5px}
+</style>
+<!-- i18n:begin —— 这一整段由 gen/inline-i18n.mjs 生成，请勿手改 -->
+<script>
+// 文案表与运行时。源文件：web/i18n-strings.mjs + web/i18n-runtime.js
+// 源文件指纹 0848f8cc32717ba8（改了文案表就要重跑 node gen/inline-i18n.mjs）
+globalThis.__I18N__ = {"zh":{"app.name":"闪传","app.brand":"Flicker","app.tagline":"一次性文件传输 · 用完即销毁","common.retry":"重试","common.cancel":"取消","common.cancelDestroy":"取消并销毁","common.done":"完成","common.error":"出错了","common.seconds":"{n} 秒","common.minutes":"{n} 分","common.langSwitch":"English","recv.title":"闪传 Flicker · 接收文件","recv.titleDone":"闪传 Flicker · 传输结束后本页将无法再次访问","recv.pw.title":"对方想给你发文件","recv.pw.sub":"输入对方告诉你的一次性密码即可开始。传输完成后，密码和链接立即失效。","recv.pw.manifestLocked":"文件清单已加密","recv.pw.manifestHint":"输入正确密码后才能看到","recv.pw.label":"一次性密码","recv.pw.placeholder":"输入对方给你的密码","recv.pw.show":"显示密码","recv.pw.start":"开始接收","recv.pw.foot":"密码不会离开你的电脑 —— 它只用来核对双方是否一致","recv.busy.title":"正在核对密码…","recv.busy.sub":"双方密码一致后才会开始传输","recv.busy.localCalc":"本地计算中，密码不会离开这台电脑（约 1 秒）","recv.busy.localParams":"正在读取会话参数…","recv.busy.relayParams":"正在从中继取回信息…","recv.go.state":"传输中","recv.go.crypto":"端到端加密 · AES-256-GCM","recv.go.total":"总进度","recv.go.speed":"速度","recv.go.elapsed":"已用时间","recv.go.eta":"剩余","recv.go.relayNote":"数据经中继转发，但内容是端到端加密的 —— 中继解不开","recv.go.streamNote":"正在<b>边收边写入磁盘</b>，不占用内存。首次接收会弹出保存位置选择框；浏览器随后会问「是否允许此网站修改文件」—— 那是写入磁盘所必需的，选<b>允许</b>即可。","recv.go.blobNote":"正在<b>在内存中拼装</b>后保存，请注意大文件可能受内存限制。","recv.go.bigWarn":"这个浏览器无法边收边写盘，而本次共 <b>{size}</b>。建议改用 <b>Edge 或 Chrome</b> 重新打开链接，否则可能中途失败。","recv.go.noStreamWarn":"当前浏览器不支持<b>边收边写磁盘</b>，超过约 1 GB 的文件可能因内存不足而失败。建议改用 <b>Edge 或 Chrome</b> 打开本页。","recv.go.noPermissionWarn":"你刚才没有允许写入文件，所以接下来会<b>先收进内存</b>再保存。本次共 <b>{size}</b>，这个大小内存放得下，可以继续；但如果想边收边写盘（更稳、也不占内存），请点「取消」，重新开始并在文件夹窗口里选 <b>允许</b>。","recv.go.reconnecting":"链路不稳，正在重连（{n}/{max}）…","recv.done.title":"传输完成","recv.done.sum":"共 {n} 个文件 · {size}","recv.err.cancelled":"已取消","recv.err.failed":"传输失败","recv.msg.decryptFail":"第 {n} 块解密失败 —— 数据可能被篡改或损坏。已中止，未写入这一块。","recv.msg.lengthMismatch":"第 {n} 块长度不符","recv.msg.chunkHashFail":"第 {n} 块校验失败（内容与清单不符）","recv.msg.fileHashFail":"文件「{name}」整体校验失败：收到的内容与发送端不一致。文件已保存但不可信。","recv.msg.peerAuthFail":"对方未能通过认证","recv.msg.relayTimeout":"等了很久也没等到下一块 —— 对方可能已经关掉了程序","recv.msg.relayGone":"中继上的房间已经不存在了 —— 可能已过期，或对方取消了传输","recv.msg.relayTaken":"这一块已经被取走过了","recv.msg.relayStatus":"中继返回 {status}","recv.msg.badManifest":"清单数据不完整","recv.msg.badSalt":"链接里的盐不完整","recv.msg.badChunk":"分块数据不完整","recv.msg.moreFiles":"还有 {n} 个文件","recv.msg.fileCount":"共 {n} 个文件","recv.msg.wantSend":"对方想给你发 {n} 个文件","recv.msg.receiving":"接收中","recv.msg.about":"约 {time}","recv.done.detail":"{n} 个文件 · {size} · 用时 {time} · 平均 {rate}/s","recv.done.verified":"✓ 校验通过 · SHA-256 一致","recv.done.saved":"已保存","recv.done.destroyList":"会话销毁清单","recv.done.ck1":"密码与会话密钥已随本页释放","recv.done.ck2":"一次性链接已失效","recv.done.ck3":"本页刷新后将无法再次访问","recv.done.share":"分享 / 保存到…","recv.done.shareUnavailable":"这个浏览器收文件时是把内容直接写到磁盘的（内存里没有副本），所以无法调起系统分享面板 —— 文件已经在你选的位置了。","recv.done.shareUnsupported":"这个平台不支持分享这种文件（{name}）。文件已经保存到磁盘了，可以从文件管理器里分享。","recv.done.shareFailed":"分享没能完成：{msg}","recv.cancel.title":"已取消","recv.cancel.keptPart":"传输已中止，<b style=\\"color:var(--text)\\">已接收的部分保留在磁盘上</b>，未接收的文件没有创建。","recv.cancel.nothing":"传输已中止，<b style=\\"color:var(--text)\\">没有文件被写入磁盘</b>。","recv.err.BAD_PASSWORD.t":"密码不一致","recv.err.BAD_PASSWORD.m":"双方密码不匹配，握手被拒绝。<b style=\\"color:var(--text)\\">没有传输任何数据</b>，也没有文件被写入磁盘。","recv.err.TOO_MANY_FAILURES.t":"会话已销毁","recv.err.TOO_MANY_FAILURES.m":"认证失败次数过多，为防暴力破解，本次会话已自动销毁。请让对方重新发起传输。","recv.err.TOKEN_USED.t":"链接已失效","recv.err.TOKEN_USED.m":"这个链接已经被使用过一次了。一次性链接只允许访问一次，请让对方重新发起传输。","recv.err.TOKEN_INVALID.t":"链接无效","recv.err.TOKEN_INVALID.m":"链接不完整或已失效。请确认完整复制了对方给你的地址（包括 <code>?k=</code> 后面的部分），或直接扫二维码。","recv.err.DESTROYED.t":"会话已销毁","recv.err.DESTROYED.m":"发送端已经销毁了这次会话。请让对方重新发起传输。","recv.err.DECRYPT.t":"数据校验失败","recv.err.DECRYPT.m":"接收到的数据无法通过完整性校验，已中止。<b style=\\"color:var(--text)\\">这一块没有被写入磁盘。</b>","recv.err.CHUNK_HASH.t":"数据校验失败","recv.err.CHUNK_HASH.m":"有一块内容与发送端清单不符，已中止。这通常意味着传输过程中发生了损坏。","recv.err.HASH.t":"文件校验失败","recv.err.HASH.m":"收到的文件与发送端的哈希不一致。文件已保存但<b style=\\"color:var(--text)\\">不可信</b>，建议删除后重传。","recv.err.CANCELLED.t":"已取消","recv.err.CANCELLED.m":"传输已中止。","recv.err.NO_WRITE_PERMISSION.t":"没有获得写入权限","recv.err.NO_WRITE_PERMISSION.m":"你拒绝了\\"允许修改文件\\"，而本次共 <b>{size}</b> —— 这个大小没法先在内存里拼装（会在传输中途失败）。<br>请点下面的「重试」，在弹出的文件夹窗口里选 <b>允许</b>，再选一个保存位置即可。","recv.err.PEER_AUTH.t":"对方认证失败","recv.err.PEER_AUTH.m":"发送端未能证明它知道密码，已中止。","recv.err.UNKNOWN.t":"出错了","recv.err.UNKNOWN.m":"未知错误","recv.err.CHUNK.t":"传输中断","recv.err.CHUNK.m":"有一块没能取到，传输已中断。","recv.err.LENGTH.t":"数据损坏","recv.err.LENGTH.m":"有一块的长度与清单不符，已中止。","recv.err.RELAY_BAD_MANIFEST.t":"数据不完整","recv.err.RELAY_BAD_MANIFEST.m":"从中继取回的清单不完整，可能只取到一部分。请重试。","recv.err.RELAY_BAD_CHUNK.t":"数据不完整","recv.err.RELAY_BAD_CHUNK.m":"从中继取回的分块不完整，请重试。","recv.err.RELAY_TIMEOUT.t":"等不到了","recv.err.RELAY_TIMEOUT.m":"很久没有收到下一块 —— 对方可能已经关掉了程序。","recv.err.RELAY_GONE.t":"房间已消失","recv.err.RELAY_GONE.m":"中继上的房间已经不在了（可能已过期，或对方取消了传输）。","recv.err.NOT_SUPPORTED.t":"浏览器不支持","recv.err.NOT_SUPPORTED.m":"这个浏览器缺少本次传输需要的某个能力。建议改用 Edge 或 Chrome。","recv.err.E_PATH_UNSAFE.t":"文件名不安全，已停止","recv.err.E_PATH_UNSAFE.m":"清单里的这个路径不能用：{name}（规则 {rule}）。为安全起见一个字节都没有写入。","recv.err.E_MANIFEST_DUPLICATE_PATH.t":"有两个文件会撞在一起，已停止","recv.err.E_MANIFEST_DUPLICATE_PATH.m":"「{a}」与「{b}」在你的系统上会是同一个文件，继续写会静默覆盖掉一个。为避免丢文件，一个字节都没有写入。","recv.err.hint.badPassword":"确认双方输入的是同一个密码（区分大小写与空格）","send.title":"闪传 Flicker · 发送","send.booting":"正在启动…","send.bootingBadge":"启动中","send.pick.head":"我要发文件","send.pick.dropTitle":"把文件或文件夹拖到这里","send.pick.dropSub":"也可以直接选整个文件夹，内部结构会一起传过去","send.pick.files":"选择文件","send.pick.dir":"选择文件夹","send.pick.path":"直接输入路径","send.pick.pathPlaceholder":"例如 D:\\\\视频\\\\旅行记录.mp4（多个用 ; 分隔）","send.pick.add":"添加","send.browse.titleFile":"选择要发的文件","send.browse.titleDir":"选择要发的文件夹","send.browse.up":"上一级","send.browse.close":"关闭","send.browse.pickDir":"就发这个文件夹","send.browse.pickFile":"就发这个文件","send.browse.pickFiles":"就发这些（{n} 个）","send.browse.selected":"已选 {n} 个","send.browse.enter":"进入这个文件夹","send.browse.hintFile":"点文件选中（可多选，Shift 连选）；点文件夹名字进去；双击直接发这一个","send.browse.hintDir":"点文件夹选中（可多选）；点左边的 ▸ 进去；这里只列文件夹","send.browse.empty":"这里没有可发的东西","send.browse.loading":"正在读取…","send.browse.more":"（只列出前 {n} 项）","send.browse.drives":"这台电脑","send.browse.failed":"打不开：{msg}","send.browse.here":"当前","send.plan.groupFiles":"{n} 个文件","send.plan.entriesMore":"还有 {n} 个未列出","send.pick.dropNoPath":"浏览器不会把文件的完整路径交给网页，请在下面这个窗口里找到它（点文件夹进去，选中后按「就发这个」）","send.plan.head":"本次传输","send.plan.more":"继续添加","send.plan.clear":"全部清空","send.plan.remove":"从清单里去掉这一项","send.plan.removeFailed":"去不掉：{msg}","send.plan.summary":"{n} 个文件 · {size}","send.pw.head":"一次性密码","send.pw.regen":"换一个","send.pw.copy":"复制","send.pw.hint":"自动生成，好念好打。传输完成后立即失效。对方需要输入完全相同的密码。","send.opt.head":"传输选项","send.opt.gift":"顺便把「闪传」也送给对方","send.opt.giftHint":"对方收到后也能把文件发给别人，不用再去下载。","send.opt.rate":"限速","send.opt.rateNone":"不限速","send.opt.rateCustom":"自定义…","send.opt.rateHint":"限制发送速度，别把上行带宽占满（家里有人打游戏、开会时有用）。选「不限速」就是全速发送。","send.opt.ratePlaceholder":"例如 512K、5M、2G","send.opt.rateBad":"看不懂这个速度写法：{spec}。可以写 512K、5M、2G（纯数字按字节/秒算）","send.opt.rateActive":"限速 {spec}/s","send.start":"开始传输","send.wait.head":"让对方扫码或打开链接","send.wait.copyLink":"复制链接","send.wait.preview":"本机预览","send.wait.hint":"链接含一次性令牌，首次访问后失效。<b style=\\"color:var(--warn)\\">建议链接和密码分开发送</b>（比如链接发微信、密码打电话说）。<br><b>对方那台电脑第一次打开会看到一次「不安全」提示</b> —— 证书只装在本机，让 TA 点「高级 → 继续前往」即可；数据仍然是端到端加密的。","send.wait.destroy":"立即销毁","send.go.total":"总进度","send.go.speed":"速度","send.go.elapsed":"已用时间","send.go.eta":"剩余","send.go.cancel":"取消并销毁","send.done.head":"传输完成","send.done.detail":"{n} 个文件 · {size} · 用时 {time}","send.done.destroyList":"会话销毁清单","send.done.ck1":"密码与会话密钥已释放","send.done.ck2":"一次性链接已失效","send.done.ck3":"本地服务已关闭","send.done.giftSent":"已把「闪传」一并送给对方","send.done.again":"再传一次","send.err.head":"出错了","send.err.back":"返回","send.err.planFailed":"无法读取这些文件","send.err.planFailedHint":"确认路径存在、且有读取权限。","send.err.startFailed":"启动失败","send.err.unknown":"未知错误","send.foot":"本页面只监听本机回环地址，局域网内其他设备无法访问","send.state.idle":"空闲中","send.state.plan":"待开始","send.state.waiting":"等待对方","send.state.transfer":"传输中","send.state.done":"已完成","send.state.destroyed":"已销毁","send.state.error":"出错","send.state.unknown":"未知","send.sub.local":"本机 {host} · 同一网络内可直连","send.sub.ready":"准备就绪","send.done.delivered":"✓ 已送达","send.fileCount":"{n} 个文件","send.copyOk":"已复制","send.err.addFailed":"添加失败：{msg}","send.err.startFailedMsg":"无法开始：{msg}","send.err.pathHint":"浏览器出于安全限制不会把本地完整路径交给网页。\\n\\n已为你填好文件名，请在前面补上所在文件夹（例如 D:\\\\视频\\\\），然后回车。\\n这样 Node 会直接读取原文件，不复制、不占内存 —— 大文件必须这样做。","phone.title":"闪传 Flicker · 发到电脑","phone.sub":"把手机里的照片、视频发给电脑","phone.pw.head":"输入电脑屏幕上的密码","phone.pw.sub":"电脑上运行着接收服务，屏幕上写着一串一次性密码。","phone.pw.label":"一次性密码","phone.pw.placeholder":"例如 k7m-3fq","phone.pw.start":"连接电脑","phone.pw.checking":"正在核对密码…（约 1 秒）","phone.pw.foot":"密码不会离开这台手机 —— 它只用来核对两边是不是同一个密码","phone.pick.head":"选要发的照片 / 视频","phone.pick.photos":"选择照片 / 视频","phone.pick.other":"选择其他文件","phone.pick.hint":"可以一次选多个。手机不能选整个文件夹 —— 那是浏览器的限制，不是程序的问题。","phone.pick.empty":"还没有选文件","phone.pick.selected":"已选 {n} 个 · 共 {size}","phone.pick.remove":"移除","phone.pick.clear":"全部清空","phone.pick.start":"开始发送","phone.pick.resume":"继续发送（接着上次没传完的）","phone.pick.hashing":"正在计算校验值 {done}/{n}（手机上这步略慢，之后电脑才能验证完整性）","phone.pick.hashDone":"校验值已算好，可以发送了","phone.pick.waitHash":"校验值还在算，稍等一下…","phone.pick.connected":"已连上电脑，密码核对通过","phone.go.state":"正在发送","phone.go.file":"当前文件","phone.go.total":"总进度","phone.go.speed":"速度","phone.go.eta":"剩余","phone.go.pause":"暂停","phone.go.paused":"已暂停（会话还在，点「继续发送」接着传）","phone.go.keepAwake":"请让这个页面保持在前台，别熄屏 —— 切到别的应用会被浏览器冻住（回来会自动接着传）","phone.go.resume":"从上次中断的地方继续（还有 {n} 块）","phone.go.retrying":"网络抖了一下，正在重试（{n}/{max}）","phone.done.head":"全部发完了","phone.done.detail":"{n} 个文件 · {size} · 用时 {time}","phone.done.renamed":"有 {n} 个文件电脑上本来就有同名的，已自动改名保存（比如「照片 (1).jpg」）","phone.done.skipped":"跳过了 {n} 个（电脑上已有同名文件）","phone.done.failed":"有 {n} 个没能定稿：{list}","phone.done.close":"手机上可以关掉这个页面了。电脑那边会接着校验并保存。","phone.done.againHint":"还想再发一批？请在电脑上重新发起一次接收 —— 那会给你一个新链接（链接是一次性的）。","phone.err.BAD_PASSWORD.t":"密码不对","phone.err.BAD_PASSWORD.m":"和电脑屏幕上那串密码不一致（区分大小写，注意中间的短横线）。可以直接重试。","phone.err.TOO_MANY_FAILURES.t":"会话已作废","phone.err.TOO_MANY_FAILURES.m":"密码连续错了太多次，为防止有人在猜，这次会话已经销毁。请在电脑上重新运行一次接收命令。","phone.err.TOKEN_USED.t":"这个链接已经用过了","phone.err.TOKEN_USED.m":"链接是一次性的。请让电脑那边重新发起一次，你会拿到一个新链接。","phone.err.TOKEN_INVALID.t":"链接无效","phone.err.TOKEN_INVALID.m":"这个链接不是这次会话的（可能过期或被改过）。请重新扫码。","phone.err.BAD_LINK.t":"链接不完整","phone.err.BAD_LINK.m":"这个地址里没有一次性令牌。请扫电脑屏幕上的二维码，或让电脑那边重新发一次链接。","phone.err.DESTROYED.t":"电脑那边已经结束了","phone.err.DESTROYED.m":"这次接收服务已经关闭（可能是超时或对方按了 Ctrl+C）。请让电脑重新运行一次。","phone.err.NETWORK.t":"连不上电脑","phone.err.NETWORK.m":"请确认：① 手机和电脑在同一个 WiFi；② 电脑上那个程序还在运行；③ 电脑的防火墙允许它。然后重试。","phone.err.E_CHUNK_AUTH.t":"有一块数据没通过校验","phone.err.E_CHUNK_AUTH.m":"传输途中有字节被改动或丢失（隧道的加密校验拦住了它），程序会自动重发这一块。","phone.err.INCOMPLETE.t":"电脑说还缺数据","phone.err.INCOMPLETE.m":"有几块没收到。点重试会先问电脑缺哪些，只补那些。","phone.err.NO_SPACE.t":"电脑磁盘空间不够","phone.err.NO_SPACE.m":"电脑那边算下来放不下这些文件，已经在写任何东西之前停下了。清出空间后重新发起即可。","phone.err.TOO_MANY_FILES.t":"文件太多","phone.err.TOO_MANY_FILES.m":"电脑设的上限被超过了（默认 5000 个）。少选一些再试。","phone.err.TOO_MANY_BYTES.t":"总量太大","phone.err.TOO_MANY_BYTES.m":"电脑设的大小上限被超过了（默认 200 GB）。少选一些再试。","phone.err.E_PATH_UNSAFE.t":"文件名不安全，已中止","phone.err.E_PATH_UNSAFE.m":"有文件名不符合电脑上的安全规则（例如带路径分隔符或保留名）。为安全起见，这次会话已经中止，一个字节都没写入。","phone.err.E_MANIFEST_DUPLICATE_PATH.t":"有两个文件会撞在一起","phone.err.E_MANIFEST_DUPLICATE_PATH.m":"选中的文件里有重名（在电脑的系统上会是同一个文件）。请去掉一个再试 —— 一个字节都没有写入。","phone.err.UNKNOWN.t":"出错了","phone.err.retry":"重试","phone.err.hint.badPassword":"确认双方输入的是同一个密码（区分大小写与空格）","recvui.head":"或者，让别人发给我","recvui.title":"手机拍的照片传到这台电脑","recvui.sub":"点下面这个按钮，屏幕上会出现一个二维码；手机扫码打开页面，选照片发过来即可。手机不用装任何东西。","recvui.enter":"接收文件","recvui.panelHead":"接收文件（手机发过来）","recvui.idleHint":"电脑会起一个 HTTPS 服务（只在局域网里可达），手机扫码就能把照片/视频发过来。传完之后密钥、链接、证书都会销毁。","recvui.dirLabel":"存到哪里","recvui.dirPick":"选择文件夹","recvui.dirPickTitle":"选择保存到哪个文件夹","recvui.dirPickOk":"就存到这里","recvui.start":"开始接收","recvui.back":"返回发送","recvui.scanHint":"手机和电脑要在同一个 WiFi 下。手机上第一次打开会看到一次「不安全」提示，点「高级 → 继续前往」即可。","recvui.copyLink":"复制链接","recvui.pwLabel":"一次性密码（手机上要输入它）","recvui.dirShowLabel":"保存到","recvui.curFile":"当前文件","recvui.stop":"停止并销毁","recvui.openDir":"打开保存文件夹","recvui.state.starting":"正在准备证书与监听…","recvui.state.waiting":"等待手机连上来…（链接与密码是一次性的）","recvui.state.transfer":"正在接收…","recvui.state.finalizing":"正在收尾（校验已完成，正在销毁密钥与证书）…","recvui.state.done":"全部收到，已保存","recvui.state.stopped":"已按你的要求停止并销毁","recvui.state.timeout":"一直没人连上来，已经销毁","recvui.state.error":"出错了","recvui.state.peer":"手机已连接：{addr}","recvui.ask.title":"电脑上已经有同名文件","recvui.ask.file":"「{rel}」在电脑上已经存在（{existing}）。这一个文件先挂着，其余文件继续传。","recvui.ask.rename":"换个名字","recvui.ask.overwrite":"覆盖它","recvui.ask.skip":"跳过这个文件","recvui.ask.timeout":"5 分钟不回答就按最安全的「换个名字」处理。","recvui.done.title":"接收结束","recvui.done.detail":"{n} 个文件 · {size} · 用时 {time}","recvui.done.again":"再来一次"},"en":{"app.name":"Flicker","app.brand":"Flicker","app.tagline":"One-shot file transfer · gone when it's done","common.retry":"Retry","common.cancel":"Cancel","common.cancelDestroy":"Cancel and destroy","common.done":"Done","common.error":"Something went wrong","common.seconds":"{n}s","common.minutes":"{n}m","common.langSwitch":"中文","recv.title":"Flicker · Receive files","recv.titleDone":"Flicker · This page will no longer work once the transfer ends","recv.pw.title":"Someone wants to send you files","recv.pw.sub":"Enter the one-time password they gave you. Once the transfer finishes, the password and the link stop working immediately.","recv.pw.manifestLocked":"File list is encrypted","recv.pw.manifestHint":"Visible only after the correct password is entered","recv.pw.label":"One-time password","recv.pw.placeholder":"Enter the password you were given","recv.pw.show":"Show password","recv.pw.start":"Start receiving","recv.pw.foot":"The password never leaves your computer — it is only used to confirm both sides match","recv.busy.title":"Verifying password…","recv.busy.sub":"The transfer starts only after both sides match","recv.busy.localCalc":"Computing locally — the password never leaves this computer (~1 second)","recv.busy.localParams":"Reading session parameters…","recv.busy.relayParams":"Fetching information from the relay…","recv.go.state":"Transferring","recv.go.crypto":"End-to-end encrypted · AES-256-GCM","recv.go.total":"Overall","recv.go.speed":"Speed","recv.go.elapsed":"Elapsed","recv.go.eta":"Remaining","recv.go.relayNote":"Data is forwarded by the relay, but end-to-end encrypted — the relay cannot read it","recv.go.streamNote":"Streaming <b>straight to disk</b> — memory stays flat. You will be asked where to save it; the browser then asks \\"allow this site to modify files?\\" — that permission is required to write the file, so choose <b>Allow</b>.","recv.go.blobNote":"Assembling <b>in memory</b> before saving. Large files may hit memory limits.","recv.go.bigWarn":"This browser cannot stream to disk, and this transfer is <b>{size}</b>. Please reopen the link in <b>Edge or Chrome</b>, or it may fail partway.","recv.go.noStreamWarn":"This browser cannot stream <b>straight to disk</b>. Files over ~1 GB may fail due to memory limits. Please open this page in <b>Edge or Chrome</b>.","recv.go.noPermissionWarn":"You did not allow file writing, so the transfer will be <b>assembled in memory</b> before saving. This one is <b>{size}</b>, which fits — you can continue. To stream to disk instead (safer, no memory use), click Cancel, start again and choose <b>Allow</b> in the folder prompt.","recv.go.reconnecting":"Connection unstable — reconnecting ({n}/{max})…","recv.done.title":"Transfer complete","recv.done.sum":"{n} files · {size}","recv.err.cancelled":"Cancelled","recv.err.failed":"Transfer failed","recv.msg.decryptFail":"Chunk {n} failed to decrypt — the data may be tampered with or corrupted. Aborted; this chunk was not written.","recv.msg.lengthMismatch":"Chunk {n} has the wrong length","recv.msg.chunkHashFail":"Chunk {n} failed verification (content does not match the manifest)","recv.msg.fileHashFail":"File \\"{name}\\" failed its overall verification: what arrived does not match the sender's copy. The file was saved but cannot be trusted.","recv.msg.peerAuthFail":"The other side failed authentication","recv.msg.relayTimeout":"Waited a long time for the next chunk — the other side may have closed the program","recv.msg.relayGone":"The room on the relay no longer exists — it may have expired, or the sender cancelled","recv.msg.relayTaken":"This chunk has already been taken","recv.msg.relayStatus":"Relay returned {status}","recv.msg.badManifest":"Incomplete manifest data","recv.msg.badSalt":"The salt in the link is incomplete","recv.msg.badChunk":"Incomplete chunk data","recv.msg.moreFiles":"{n} more files","recv.msg.fileCount":"{n} files","recv.msg.wantSend":"Someone wants to send you {n} files","recv.msg.receiving":"Receiving","recv.msg.about":"about {time}","recv.done.detail":"{n} files · {size} · {time} · {rate}/s average","recv.done.verified":"✓ Verified · SHA-256 matches","recv.done.saved":"Saved","recv.done.destroyList":"Session destroyed","recv.done.ck1":"Password and session keys released with this page","recv.done.ck2":"The one-time link no longer works","recv.done.ck3":"Reloading this page will not work again","recv.done.share":"Share / Save to…","recv.done.shareUnavailable":"This browser streams files straight to disk (no copy is kept in memory), so the system share sheet cannot be used — the file is already where you chose to save it.","recv.done.shareUnsupported":"This platform cannot share this kind of file ({name}). The file is already saved to disk — you can share it from your file manager.","recv.done.shareFailed":"Sharing did not complete: {msg}","recv.cancel.title":"Cancelled","recv.cancel.keptPart":"Transfer stopped. <b style=\\"color:var(--text)\\">What was already received stays on disk</b>; files that were not received were never created.","recv.cancel.nothing":"Transfer stopped. <b style=\\"color:var(--text)\\">No files were written to disk</b>.","recv.err.BAD_PASSWORD.t":"Passwords do not match","recv.err.BAD_PASSWORD.m":"The two sides do not share the same password, so the handshake was rejected. <b style=\\"color:var(--text)\\">No data was transferred</b> and no files were written to disk.","recv.err.TOO_MANY_FAILURES.t":"Session destroyed","recv.err.TOO_MANY_FAILURES.m":"Too many failed attempts. To prevent brute force, this session was destroyed automatically. Ask the sender to start a new transfer.","recv.err.TOKEN_USED.t":"Link already used","recv.err.TOKEN_USED.m":"This link has already been used once. One-time links only work once — ask the sender to start a new transfer.","recv.err.TOKEN_INVALID.t":"Invalid link","recv.err.TOKEN_INVALID.m":"The link is incomplete or has expired. Make sure you copied the whole address (including everything after <code>?k=</code>), or scan the QR code instead.","recv.err.DESTROYED.t":"Session destroyed","recv.err.DESTROYED.m":"The sender has destroyed this session. Ask them to start a new transfer.","recv.err.DECRYPT.t":"Verification failed","recv.err.DECRYPT.m":"The received data failed its integrity check, so the transfer was stopped. <b style=\\"color:var(--text)\\">This chunk was not written to disk.</b>","recv.err.CHUNK_HASH.t":"Verification failed","recv.err.CHUNK_HASH.m":"One chunk does not match the sender's manifest, so the transfer was stopped. This usually means the data was corrupted in transit.","recv.err.HASH.t":"File verification failed","recv.err.HASH.m":"The received file does not match the sender's hash. It was saved but <b style=\\"color:var(--text)\\">cannot be trusted</b> — delete it and transfer again.","recv.err.CANCELLED.t":"Cancelled","recv.err.CANCELLED.m":"The transfer was stopped.","recv.err.NO_WRITE_PERMISSION.t":"No write permission","recv.err.NO_WRITE_PERMISSION.m":"You declined \\"allow this site to modify files\\", and this transfer is <b>{size}</b> — too large to assemble in memory first (it would fail partway).<br>Click <b>Retry</b> below, choose <b>Allow</b> in the folder prompt, then pick a save location.","recv.err.PEER_AUTH.t":"Sender failed authentication","recv.err.PEER_AUTH.m":"The sender could not prove it knows the password, so the transfer was stopped.","recv.err.UNKNOWN.t":"Something went wrong","recv.err.UNKNOWN.m":"Unknown error","recv.err.CHUNK.t":"Transfer interrupted","recv.err.CHUNK.m":"A chunk could not be fetched, so the transfer was interrupted.","recv.err.LENGTH.t":"Corrupted data","recv.err.LENGTH.m":"A chunk had the wrong length, so the transfer was stopped.","recv.err.RELAY_BAD_MANIFEST.t":"Incomplete data","recv.err.RELAY_BAD_MANIFEST.m":"The manifest fetched from the relay was incomplete. Please retry.","recv.err.RELAY_BAD_CHUNK.t":"Incomplete data","recv.err.RELAY_BAD_CHUNK.m":"A chunk fetched from the relay was incomplete. Please retry.","recv.err.RELAY_TIMEOUT.t":"Timed out","recv.err.RELAY_TIMEOUT.m":"No new chunk arrived for a long time — the other side may have closed the program.","recv.err.RELAY_GONE.t":"Room is gone","recv.err.RELAY_GONE.m":"The room on the relay no longer exists (it may have expired, or the sender cancelled).","recv.err.NOT_SUPPORTED.t":"Browser not supported","recv.err.NOT_SUPPORTED.m":"This browser lacks a capability this transfer needs. Please use Edge or Chrome.","recv.err.E_PATH_UNSAFE.t":"Unsafe file name — stopped","recv.err.E_PATH_UNSAFE.m":"A path in the manifest cannot be used: {name} (rule {rule}). Nothing was written to disk.","recv.err.E_MANIFEST_DUPLICATE_PATH.t":"Two files would collide — stopped","recv.err.E_MANIFEST_DUPLICATE_PATH.m":"\\"{a}\\" and \\"{b}\\" would be the same file on your system; writing both would silently overwrite one. Nothing was written to disk.","recv.err.hint.badPassword":"Make sure both sides typed the same password (case and spaces matter)","send.title":"Flicker · Send","send.booting":"Starting…","send.bootingBadge":"Starting","send.pick.head":"Send files","send.pick.dropTitle":"Drag files or folders here","send.pick.dropSub":"You can also pick a whole folder — its structure is preserved","send.pick.files":"Choose files","send.pick.dir":"Choose folder","send.pick.path":"Type a path instead","send.pick.pathPlaceholder":"e.g. D:\\\\Videos\\\\trip.mp4 (separate several with ;)","send.pick.add":"Add","send.browse.titleFile":"Pick files to send","send.browse.titleDir":"Pick a folder to send","send.browse.up":"Up","send.browse.close":"Close","send.browse.pickDir":"Send this folder","send.browse.pickFile":"Send this file","send.browse.pickFiles":"Send these ({n})","send.browse.selected":"{n} selected","send.browse.enter":"Open this folder","send.browse.hintFile":"Click files to select (multi-select, Shift for a range). Click a folder name to open it; double-click sends that one item","send.browse.hintDir":"Click folders to select (multi-select). Use the ▸ on the left to open one. Only folders are listed here","send.browse.empty":"Nothing to send in here","send.browse.loading":"Reading…","send.browse.more":"(showing the first {n})","send.browse.drives":"This computer","send.browse.failed":"Cannot open: {msg}","send.browse.here":"Now in","send.plan.groupFiles":"{n} files","send.plan.entriesMore":"{n} more not listed","send.pick.dropNoPath":"Browsers never hand a page the full path of a file, so find it in this window instead (open folders, then click “Send this…”)","send.plan.head":"This transfer","send.plan.more":"Add more","send.plan.clear":"Clear all","send.plan.remove":"Remove this item from the list","send.plan.removeFailed":"Could not remove it: {msg}","send.plan.summary":"{n} files · {size}","send.pw.head":"One-time password","send.pw.regen":"New one","send.pw.copy":"Copy","send.pw.hint":"Generated automatically — easy to read aloud and type. It stops working the moment the transfer ends. The other side must type exactly the same password.","send.opt.head":"Options","send.opt.gift":"Also send them Flicker itself","send.opt.giftHint":"So they can pass files on to someone else without downloading it again.","send.opt.rate":"Speed limit","send.opt.rateNone":"No limit","send.opt.rateCustom":"Custom…","send.opt.rateHint":"Cap the sending speed so it does not saturate your uplink (handy when someone else is gaming or on a call). “No limit” sends at full speed.","send.opt.ratePlaceholder":"e.g. 512K, 5M, 2G","send.opt.rateBad":"Cannot read that speed: {spec}. Use 512K, 5M or 2G (a plain number means bytes/s)","send.opt.rateActive":"Limited to {spec}/s","send.start":"Start transfer","send.wait.head":"Let them scan the code or open the link","send.wait.copyLink":"Copy link","send.wait.preview":"Preview locally","send.wait.hint":"The link contains a one-time token that stops working after the first visit. <b style=\\"color:var(--warn)\\">Send the link and the password separately</b> (e.g. link by chat, password by phone).<br><b>Their browser will show a \\"not secure\\" warning the first time</b> — the certificate is only installed on this machine. Tell them to click \\"Advanced → Proceed\\"; the data is still end-to-end encrypted.","send.wait.destroy":"Destroy now","send.go.total":"Overall","send.go.speed":"Speed","send.go.elapsed":"Elapsed","send.go.eta":"Remaining","send.go.cancel":"Cancel and destroy","send.done.head":"Transfer complete","send.done.detail":"{n} files · {size} · {time}","send.done.destroyList":"Session destroyed","send.done.ck1":"Password and session keys released","send.done.ck2":"The one-time link no longer works","send.done.ck3":"The local server is closed","send.done.giftSent":"Flicker was sent along with your files","send.done.again":"Send again","send.err.head":"Something went wrong","send.err.back":"Back","send.err.planFailed":"Could not read these files","send.err.planFailedHint":"Check that the paths exist and are readable.","send.err.startFailed":"Failed to start","send.err.unknown":"Unknown error","send.foot":"This page listens on loopback only — other devices on your LAN cannot reach it","send.state.idle":"Idle","send.state.plan":"Ready to start","send.state.waiting":"Waiting for the other side","send.state.transfer":"Transferring","send.state.done":"Done","send.state.destroyed":"Destroyed","send.state.error":"Error","send.state.unknown":"Unknown","send.sub.local":"This machine: {host} · reachable on your network","send.sub.ready":"Ready","send.done.delivered":"✓ Delivered","send.fileCount":"{n} files","send.copyOk":"Copied","send.err.addFailed":"Could not add: {msg}","send.err.startFailedMsg":"Could not start: {msg}","send.err.pathHint":"For security reasons the browser does not give a web page your full local path.\\n\\nThe file name has been filled in — add the folder in front of it (e.g. D:\\\\Videos\\\\) and press Enter.\\nThat way Node reads the original file directly: no copy, no memory cost. Large files require this.","phone.title":"Flicker · Send to computer","phone.sub":"Send photos and videos from this phone to the computer","phone.pw.head":"Type the password shown on the computer","phone.pw.sub":"The computer is running a receive service and its screen shows a one-time password.","phone.pw.label":"One-time password","phone.pw.placeholder":"e.g. k7m-3fq","phone.pw.start":"Connect","phone.pw.checking":"Checking the password… (about a second)","phone.pw.foot":"The password never leaves this phone — it only proves both sides typed the same one","phone.pick.head":"Pick photos / videos to send","phone.pick.photos":"Choose photos / videos","phone.pick.other":"Choose other files","phone.pick.hint":"You can select several at once. A phone cannot pick a whole folder — that is a browser limit, not a limitation of this program.","phone.pick.empty":"Nothing selected yet","phone.pick.selected":"{n} selected · {size} total","phone.pick.remove":"Remove","phone.pick.clear":"Clear all","phone.pick.start":"Start sending","phone.pick.resume":"Resume (continue the parts that did not finish)","phone.pick.hashing":"Computing checksums {done}/{n} (slower on a phone; the computer needs them to verify integrity)","phone.pick.hashDone":"Checksums ready — you can send now","phone.pick.waitHash":"Still computing checksums, one moment…","phone.pick.connected":"Connected to the computer — password verified","phone.go.state":"Sending","phone.go.file":"Current file","phone.go.total":"Total progress","phone.go.speed":"Speed","phone.go.eta":"Remaining","phone.go.pause":"Pause","phone.go.paused":"Paused (the session is still alive — tap \\"Resume\\" to carry on)","phone.go.keepAwake":"Keep this page in the foreground and the screen awake — a backgrounded page gets frozen by the browser (it resumes automatically when you come back)","phone.go.resume":"Resuming where it stopped ({n} chunks left)","phone.go.retrying":"The network hiccuped, retrying ({n}/{max})","phone.done.head":"Everything sent","phone.done.detail":"{n} files · {size} · took {time}","phone.done.renamed":"{n} file(s) already existed on the computer and were saved under a new name (e.g. \\"photo (1).jpg\\")","phone.done.skipped":"{n} skipped (the computer already had files with those names)","phone.done.failed":"{n} could not be finalised: {list}","phone.done.close":"You can close this page now. The computer will finish verifying and saving.","phone.done.againHint":"Want to send another batch? Start the receive service again on the computer —— that gives you a fresh link (links are one-shot).","phone.err.BAD_PASSWORD.t":"Wrong password","phone.err.BAD_PASSWORD.m":"It does not match the password on the computer screen (case matters, and watch the dash in the middle). You can retry right away.","phone.err.TOO_MANY_FAILURES.t":"Session destroyed","phone.err.TOO_MANY_FAILURES.m":"Too many wrong passwords, so this session was destroyed to stop guessing. Run the receive command on the computer again.","phone.err.TOKEN_USED.t":"This link was already used","phone.err.TOKEN_USED.m":"The link is one-shot. Ask the computer to start again and you will get a fresh one.","phone.err.TOKEN_INVALID.t":"Invalid link","phone.err.TOKEN_INVALID.m":"This link does not belong to the current session (expired or altered). Scan the code again.","phone.err.BAD_LINK.t":"Incomplete link","phone.err.BAD_LINK.m":"There is no one-time token in this address. Scan the QR code on the computer screen, or ask for the link again.","phone.err.DESTROYED.t":"The computer side has finished","phone.err.DESTROYED.m":"This receive service is closed (timed out, or the other side pressed Ctrl+C). Start it again on the computer.","phone.err.NETWORK.t":"Cannot reach the computer","phone.err.NETWORK.m":"Check that: (1) the phone and the computer are on the same WiFi; (2) the program is still running on the computer; (3) its firewall allows it. Then retry.","phone.err.E_CHUNK_AUTH.t":"One chunk failed verification","phone.err.E_CHUNK_AUTH.m":"Bytes were changed or lost on the way (the tunnel encryption caught it); the program resends that chunk automatically.","phone.err.INCOMPLETE.t":"The computer says data is missing","phone.err.INCOMPLETE.m":"Some chunks did not arrive. Retrying first asks the computer what is missing and sends only that.","phone.err.NO_SPACE.t":"Not enough space on the computer","phone.err.NO_SPACE.m":"The computer calculated that these files do not fit and stopped before writing anything. Free some space and start again.","phone.err.TOO_MANY_FILES.t":"Too many files","phone.err.TOO_MANY_FILES.m":"The computer’s limit was exceeded (5000 by default). Select fewer and retry.","phone.err.TOO_MANY_BYTES.t":"Too much data","phone.err.TOO_MANY_BYTES.m":"The computer’s size limit was exceeded (200 GB by default). Select less and retry.","phone.err.E_PATH_UNSAFE.t":"Unsafe file name — aborted","phone.err.E_PATH_UNSAFE.m":"A file name breaks the computer’s safety rules (path separators, reserved names…). The session was aborted and not a single byte was written.","phone.err.E_MANIFEST_DUPLICATE_PATH.t":"Two files would collide","phone.err.E_MANIFEST_DUPLICATE_PATH.m":"Two of the selected files share a name (they would be the same file on the computer). Remove one and retry — nothing was written.","phone.err.UNKNOWN.t":"Something went wrong","phone.err.retry":"Retry","phone.err.hint.badPassword":"Make sure both sides typed the same password (case and spaces matter)","recvui.head":"Or, let someone send to me","recvui.title":"Photos from your phone, onto this computer","recvui.sub":"Click the button below and a QR code appears; the phone scans it, picks photos and sends them. The phone installs nothing.","recvui.enter":"Receive files","recvui.panelHead":"Receiving (sent from a phone)","recvui.idleHint":"The computer starts an HTTPS service (reachable on your LAN only); the phone scans the code and sends photos/videos. When it finishes, the keys, the link and the certificate are all destroyed.","recvui.dirLabel":"Save to","recvui.dirPick":"Choose folder","recvui.dirPickTitle":"Choose where to save","recvui.dirPickOk":"Save here","recvui.start":"Start receiving","recvui.back":"Back to sending","recvui.scanHint":"Phone and computer must be on the same WiFi. The phone will show a \\"not secure\\" warning the first time — tap \\"Advanced → Proceed\\".","recvui.copyLink":"Copy link","recvui.pwLabel":"One-time password (typed into the phone)","recvui.dirShowLabel":"Saving to","recvui.curFile":"Current file","recvui.stop":"Stop and destroy","recvui.openDir":"Open the save folder","recvui.state.starting":"Preparing certificate and listener…","recvui.state.waiting":"Waiting for the phone… (the link and password are one-shot)","recvui.state.transfer":"Receiving…","recvui.state.finalizing":"Finishing up (verification passed; destroying keys and certificate)…","recvui.state.done":"All received and saved","recvui.state.stopped":"Stopped and destroyed as you asked","recvui.state.timeout":"Nobody connected, so it was destroyed","recvui.state.error":"Something went wrong","recvui.state.peer":"Phone connected: {addr}","recvui.ask.title":"A file with that name already exists","recvui.ask.file":"\\"{rel}\\" already exists on the computer ({existing}). That one file waits for you; the rest keep transferring.","recvui.ask.rename":"Use a new name","recvui.ask.overwrite":"Overwrite it","recvui.ask.skip":"Skip this file","recvui.ask.timeout":"After 5 minutes without an answer it takes the safest choice (rename).","recvui.done.title":"Receiving finished","recvui.done.detail":"{n} files · {size} · took {time}","recvui.done.again":"Start again"}};
+globalThis.__I18N_LANGS__ = [{"code":"zh","label":"中文"},{"code":"en","label":"English"}];
+globalThis.__I18N_KEY__ = "flicker.lang";
+globalThis.__I18N_DEFAULT__ = "zh";
+globalThis.__I18N_PERSIST__ = false;
+/**
+ * 界面文案的运行时（中英）。
+ *
+ * ⚠️ 这个文件由 gen/inline-i18n.mjs **内联进 web/*.html**，不是运行时加载的。
+ *    接收端页面必须保持单文件、零外部请求（局域网可能没有外网）。
+ *    内联时会把 web/i18n-strings.mjs 的文案表以 **JSON 字面量**塞进 __I18N__，
+ *    不用 eval、也不做模块打包 —— 页面里就是一份普通数据。
+ *
+ * ── 为什么把 document / localStorage 作为**参数**传进 IIFE ──────
+ *
+ * 一开始这几处写的是 \`global.document\`（从 globalThis 上取）。在浏览器里没问题，
+ * 但那样**无法测试**：Node 的 globalThis 上没有 document，于是
+ * \`if (global.document)\` 恒为假、boot() 从不执行，而 API 又挂在 globalThis 上
+ * 所以"看起来能跑"。测试里想注入假 DOM 也无从下手 —— 注入的 document
+ * 根本不在 globalThis 上。
+ *
+ * 改成参数之后：浏览器里拿到真的 document，测试里 \`new Function('document', …)\`
+ * 注入假 DOM 就能真正生效。**这条依赖是测试逼出来的，不是设计洁癖。**
+ *
+ * ── 为什么用 data-i18n 属性，而不是把文案全塞进 JS ────────────
+ *
+ * 因为**页面在没有脚本时也该能看**。HTML 标签里保留中文原文，
+ * 脚本只是"按语言替换" —— 脚本没跑起来时用户看到的仍是完整的中文界面，
+ * 而不是一堆空白。
+ *
+ * ── 用法 ─────────────────────────────────────────────────────
+ *
+ *   HTML:
+ *     <h2 data-i18n="recv.pw.title">对方想给你发文件</h2>
+ *     <input data-i18n-attr="placeholder:recv.pw.placeholder" placeholder="…">
+ *     <p data-i18n="recv.go.streamNote" data-i18n-html>正在<b>边收边写</b>…</p>
+ *     <html data-i18n-title="recv.title">          ← <title> 单独处理
+ *     <button data-lang-switch></button>           ← 语言切换按钮
+ *
+ *   JS:
+ *     t('recv.msg.moreFiles', { n: 3 })     // 「还有 3 个文件」/ "3 more files"
+ *     setLang('en')                          // 切换并重绘
+ */
+;(function (global, doc, store, nav) {
+  'use strict'
+
+  var TABLE = global.__I18N__ || { zh: {}, en: {} }
+  var LANGS = global.__I18N_LANGS__ || [{ code: 'zh', label: '中文' }]
+  var KEY = global.__I18N_KEY__ || 'flicker.lang'
+  var DEFAULT = global.__I18N_DEFAULT__ || 'zh'
+  /**
+   * 要不要**跨会话记住**语言偏好。
+   *
+   * ⚠️ 两个页面的答案不一样，这是刻意的：
+   *   · 发送端（station）：用户自己的机器，会反复用 → 记住，省得每次切。
+   *   · 接收端（receiver）：**对方的一次性页面** → 不记住。
+   *     这个页面对接收端的承诺是"不留痕迹"，不该为了省一次点击就破例 ——
+   *     在浏览器里留下一条记录，本身就是痕迹。
+   *     所以接收端只在**本次会话内**记住（sessionStorage，关标签即消失）。
+   */
+  var PERSIST = global.__I18N_PERSIST__ !== false
+  // 传进来的 store **已经是存储对象本身** —— 内联器把运行时末尾的
+  // sessionStorage 占位符按页面换成了 localStorage 或 sessionStorage。
+  // 取不到（隐私模式）就整块禁用，只影响"记不记得住语言"，不影响界面显示。
+  var storeArea = store || null
+
+  var SUPPORTED = LANGS.map(function (l) { return l.code })
+
+  // ── 语言选择 ────────────────────────────────────────────────
+  //
+  // 优先级：本次记得的 > 浏览器语言 > 默认。
+  // ⚠️ 接收端**不写** localStorage；见上面 PERSIST 的说明。
+  function readStored() {
+    if (!storeArea) return null
+    try {
+      var v = storeArea.getItem(KEY)
+      return SUPPORTED.indexOf(v) >= 0 ? v : null
+    } catch (e) { return null }        // 隐私模式下访问存储会抛
+  }
+
+  function detect() {
+    var stored = readStored()
+    if (stored) return stored
+    // ⚠️ 这里必须用**参数** nav，不能写 global.navigator。
+    //    Node 里 globalThis.navigator **是存在的**（值来自系统区域设置），
+    //    所以它会静默遮蔽测试注入的假 navigator —— 而且不报错，
+    //    只是语言检测永远按宿主机的区域走。这个坑排查了很久：
+    //    表现是"测试里传了 en-US，运行时却按 zh 走"。
+    var list = (nav && (nav.languages || (nav.language ? [nav.language] : null))) || []
+    for (var i = 0; i < list.length; i++) {
+      var tag = String(list[i] || '').toLowerCase()
+      if (!tag) continue
+      // zh-CN / zh-Hans-CN → zh ；en-US → en
+      var base = tag.split('-')[0]
+      if (SUPPORTED.indexOf(base) >= 0) return base
+    }
+    return DEFAULT
+  }
+
+  var lang = detect()
+
+  // ── 取词与插值 ──────────────────────────────────────────────
+  //
+  // 占位符是 {name}。中英语序不同，所以**必须**整句翻译 + 占位符替换，
+  // 不能靠拼字符串 —— 例：「还有 {n} 个文件」→ "{n} more files"。
+  function t(key, vars) {
+    var s = (TABLE[lang] && TABLE[lang][key])
+    // 缺词时退回默认语言，再退回键名本身。
+    // 退回键名是刻意的：界面上出现 "recv.pw.title" 这样的字样很刺眼，
+    // 一眼就知道漏了哪一条，比悄悄显示空白或中文好排查。
+    if (s == null) s = (TABLE[DEFAULT] && TABLE[DEFAULT][key])
+    if (s == null) return key
+    if (!vars) return s
+    return s.replace(/\\{(\\w+)\\}/g, function (m, name) {
+      return Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : m
+    })
+  }
+
+  // ── 重绘 ────────────────────────────────────────────────────
+  function apply(root) {
+    var scope = root || doc
+    if (!scope || !scope.querySelectorAll) return 0
+    var n = 0
+
+    // 文本节点
+    var nodes = scope.querySelectorAll('[data-i18n]')
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i]
+      var key = el.getAttribute('data-i18n')
+      if (!key) continue
+      var val = t(key)
+      if (el.hasAttribute('data-i18n-html')) el.innerHTML = val
+      else el.textContent = val
+      n++
+    }
+
+    // 属性：data-i18n-attr="placeholder:key" 或 "title:key,aria-label:key2"
+    var attrs = scope.querySelectorAll('[data-i18n-attr]')
+    for (var j = 0; j < attrs.length; j++) {
+      var el2 = attrs[j]
+      var spec = el2.getAttribute('data-i18n-attr') || ''
+      var parts = spec.split(',')
+      for (var k = 0; k < parts.length; k++) {
+        var pair = parts[k].split(':')
+        if (pair.length !== 2) continue
+        var attr = pair[0].trim(), key2 = pair[1].trim()
+        if (attr && key2) { el2.setAttribute(attr, t(key2)); n++ }
+      }
+    }
+
+    return n
+  }
+
+  // ── 切换 ────────────────────────────────────────────────────
+  function setLang(code) {
+    if (SUPPORTED.indexOf(code) < 0) return false
+    lang = code
+    try { if (storeArea) storeArea.setItem(KEY, code) } catch (e) { /* 隐私模式，忽略 */ }
+
+    if (doc && doc.documentElement) {
+      doc.documentElement.setAttribute('lang', code === 'zh' ? 'zh-CN' : code)
+    }
+    apply()
+
+    // 按钮显示的是"另一种语言"的名字 —— 切完要跟着换，否则切到英文后
+    // 按钮上还写着"English"（点不动你自己）
+    var buttons = doc ? doc.querySelectorAll('[data-lang-switch]') : []
+    var other = LANGS.filter(function (l) { return l.code !== lang })[0]
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].textContent = other ? other.label : ''
+      buttons[i].setAttribute('title', t('common.langSwitch'))
+    }
+
+    // <title> 不是普通元素，单独处理（属性挂在 <html> 上）
+    var titleKey = doc && doc.documentElement && doc.documentElement.getAttribute('data-i18n-title')
+    if (titleKey && doc) doc.title = t(titleKey)
+
+    // 广播一次，让**页面之外**依赖语言的东西也能跟上。
+    // 目前只有 PWA 的 manifest 用它（应用名要跟着语言走，
+    // 否则切了语言、加到主屏幕上的名字还是旧的）。
+    try {
+      if (doc && global.CustomEvent && doc.dispatchEvent) {
+        doc.dispatchEvent(new global.CustomEvent('flicker:lang', { detail: { lang: lang } }))
+      }
+    } catch (e) { /* 没有 CustomEvent 就算了，不影响界面 */ }
+
+    return true
+  }
+
+  function getLang() { return lang }
+
+  var api = { t: t, apply: apply, setLang: setLang, getLang: getLang, LANGS: LANGS }
+  global.FlickerI18N = api
+
+  // ── 自动就位 ────────────────────────────────────────────────
+  function boot() {
+    setLang(lang)
+    var buttons = doc ? doc.querySelectorAll('[data-lang-switch]') : []
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener('click', function (ev) {
+        ev.preventDefault()
+        var next = LANGS.filter(function (l) { return l.code !== lang })[0]
+        if (next) setLang(next.code)
+      })
+    }
+  }
+
+  if (doc) {
+    if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot)
+    else boot()
+  }
+})(
+  typeof globalThis !== 'undefined' ? globalThis : this,
+  typeof document !== 'undefined' ? document : null,
+  // 存储：**由内联器按页面替换占位符**（见 gen/inline-i18n.mjs）。
+  //   · 接收端 → sessionStorage（关标签即消失）
+  //   · 发送端 → localStorage
+  // 用占位符而不是"两个都传进来再挑一个"，是为了让**接收端页面里
+  // 根本不出现 localStorage 这个名字** —— 否则"不留跨会话痕迹"这条承诺
+  // 就只能靠注释解释"虽然出现了但没用"，静态检查也失效。
+  // 隐私模式下"访问"存储对象本身就会抛，所以整个取值都要包起来。
+  (function () {
+    try { return typeof sessionStorage !== 'undefined' ? sessionStorage : null } catch (e) { return null }
+  })(),
+  // navigator 也走参数（见 detect() 里的说明：global.navigator 会遮蔽注入）
+  (function () { try { return typeof navigator !== 'undefined' ? navigator : null } catch (e) { return null } })()
+)
+</script>
+<!-- i18n:end -->
+<!-- pwa:begin —— 这一整段由 gen/inline-pwa.mjs 生成，请勿手改 -->
+<script>
+// PWA 元数据。由 gen/inline-pwa.mjs 从 gen/pwa-assets.mjs 生成。
+// 图标与 manifest 都是 data URL —— **不产生任何外部请求**，
+// 因为接收端可能在没有外网的局域网里打开。
+(function () {
+  'use strict'
+  var A = {"icons":[{"src":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22192%22%20height%3D%22192%22%20viewBox%3D%220%200%20192%20192%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%235b6cff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237b5cff%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22192%22%20height%3D%22192%22%20rx%3D%2242%22%20fill%3D%22url(%23g)%22%2F%3E%3Cpath%20d%3D%22M%20103.83%2030.72%20L%2038.55%20103.83%20L%2082.94%20103.83%20L%2088.17%20161.28%20L%20153.45%2088.17%20L%20109.06%2088.17%20Z%22%20fill%3D%22%23fff%22%2F%3E%3C%2Fsvg%3E","sizes":"192x192","type":"image/svg+xml","purpose":"any"},{"src":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22512%22%20height%3D%22512%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%235b6cff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237b5cff%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20rx%3D%22112%22%20fill%3D%22url(%23g)%22%2F%3E%3Cpath%20d%3D%22M%20276.89%2081.92%20L%20102.81%20276.89%20L%20221.18%20276.89%20L%20235.11%20430.08%20L%20409.19%20235.11%20L%20290.82%20235.11%20Z%22%20fill%3D%22%23fff%22%2F%3E%3C%2Fsvg%3E","sizes":"512x512","type":"image/svg+xml","purpose":"any"},{"src":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22512%22%20height%3D%22512%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%235b6cff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%237b5cff%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20rx%3D%220%22%20fill%3D%22url(%23g)%22%2F%3E%3Cpath%20d%3D%22M%20271.97%20122.88%20L%20138.85%20271.97%20L%20229.38%20271.97%20L%20240.03%20389.12%20L%20373.15%20240.03%20L%20282.62%20240.03%20Z%22%20fill%3D%22%23fff%22%2F%3E%3C%2Fsvg%3E","sizes":"512x512","type":"image/svg+xml","purpose":"maskable"}],"themeColor":"#5b6cff","background":"#12141c"};
+  if (!document || !document.head) return
+
+  function meta(name, content) {
+    var m = document.createElement('meta')
+    m.setAttribute(name.indexOf(':') > 0 ? 'property' : 'name', name)
+    m.setAttribute('content', content)
+    document.head.appendChild(m)
+  }
+
+  // ── manifest（data URL）────────────────────────────────────
+  // 应用名跟随界面语言。t() 由 i18n 运行时提供；它没就位时退回页面上已有的中文名，
+  // 不让"装到主屏幕上"变成一个没有名字的图标。
+  function T(key, fallback) {
+    try {
+      var v = window.FlickerI18N && window.FlickerI18N.t(key)
+      return (v && v !== key) ? v : fallback
+    } catch (e) { return fallback }
+  }
+
+  var mf = {
+    name: T('app.name', '闪传') + ' Flicker',
+    short_name: T('app.name', '闪传'),
+    description: T('app.tagline', '一次性文件传输'),
+    lang: document.documentElement.getAttribute('lang') || 'zh-CN',
+    start_url: '.',
+    scope: '.',
+    display: 'standalone',
+    orientation: 'any',
+    background_color: A.background,
+    theme_color: A.themeColor,
+    icons: A.icons,
+  }
+
+  var link = document.createElement('link')
+  link.rel = 'manifest'
+  link.href = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(mf))
+  document.head.appendChild(link)
+
+  // ── 图标与主题色 ───────────────────────────────────────────
+  // apple-touch-icon 是给 iOS 的：Safari 不读 manifest 的 icons，
+  // 只认这个 link。没有它，iOS 加到主屏幕会是页面的截图。
+  var touch = document.createElement('link')
+  touch.rel = 'apple-touch-icon'
+  touch.href = A.icons[A.icons.length - 1].src
+  document.head.appendChild(touch)
+
+  meta('theme-color', A.themeColor)
+  meta('apple-mobile-web-app-capable', 'yes')
+  meta('apple-mobile-web-app-status-bar-style', 'black-translucent')
+  meta('apple-mobile-web-app-title', mf.short_name)
+
+  // 语言切换后应用名会变，重开时才能生效 —— 这里同步更新一下 manifest，
+  // 免得"切了语言但主屏幕上的名字还是旧的"。
+  window.addEventListener('flicker:lang', function () {
+    mf.name = T('app.name', '闪传') + ' Flicker'
+    mf.short_name = T('app.name', '闪传')
+    mf.lang = document.documentElement.getAttribute('lang') || 'zh-CN'
+    link.href = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(mf))
+  })
+})()
+</script>
+<!-- pwa:end -->
+<!-- path-rules:begin —— 这一整段由 gen/inline-path-rules.mjs 从 src/path-safety.js 生成，请勿手改 -->
+<script>
+// ── 路径安全规则（PROTOCOL.md §6.2）────────────────────────────
+// 由 gen/inline-path-rules.mjs 从 src/path-safety.js 原样内联，请勿手改。
+//
+// 为什么在页面里也要有这一份：真正决定文件落到用户磁盘上叫什么的，
+// 是**这里**，不是 Node 那边。改名的后果（两条路径撞成同一个 → 静默覆盖）
+// 也只有在页面里才防得住。
+(function () {
+  'use strict'
+  /**
+   * 路径安全规则（PROTOCOL.md §6.2）
+   * =================================
+   *
+   * ⚠️ **这个文件必须在浏览器里也能跑。**
+   *    不许 import \`node:path\`、不许用 Buffer、不许用任何 Node 专有的东西 ——
+   *    它会被 \`gen/inline-path-rules.mjs\` **原样内联**进 web/receiver.html。
+   *
+   * ── 为什么要单独一份、还要内联 ────────────────────────────────
+   *
+   * 从前路径规则有**两份实现**，而且不一样：
+   *   · \`src/manifest.js\`：12 条规则基本齐（R1–R12）
+   *   · \`web/receiver.html\`：只有一行 \`replace(/[<>:"|?*\\x00-\\x1f]/g, '_')\`
+   *
+   * 而**真正决定文件落到用户磁盘上哪个名字的，是浏览器那一份**。
+   * 于是下面这些情况在真实使用中会出事（都不是"恶意清单"，普通用户就能撞上）：
+   *
+   *   · Linux 发来名为 \`CON.txt\` / \`NUL\` 的文件 → Windows 上创建失败
+   *   · Linux 发来 \`name.\`（结尾是点）→ Windows 静默丢掉那个点，两个文件变成同一个
+   *   · 清单里同时有 \`a:b.txt\` 与 \`a_b.txt\` → 改写后同名 → **静默覆盖，丢一个文件**
+   *   · macOS 上 \`café\`（NFC）与 \`café\`（NFD）是同一个文件 → 同样静默覆盖
+   *   · 大小写只差的两个名字（\`A.txt\` / \`a.txt\`）→ Windows/macOS 上同一个文件
+   *
+   * 最后两条正是 PROTOCOL.md §6.2 里挂着的「**待验证**：macOS 的 NFD/NFC 可能导致
+   * 同名文件冲突」。现在它不再待验证了：**比较用的键一律先做 NFC 规范化 + 大小写折叠**，
+   * 并且接收端在**开传之前**就把冲突查出来、直接拒绝，而不是传到一半再覆盖。
+   *
+   * 一份实现 + 内联（\`gen/inline-path-rules.mjs --check\` 守住同步），
+   * 就不会再出现"两边规则不一样"这种事。
+   */
+
+  /** 规则的机器可读编号 → 人能看懂的一句话 */
+  const PATH_RULES = {
+    R1: '非绝对路径',
+    R2: '非盘符路径',
+    R3: '非 UNC 路径',
+    R4: '无上跳（..）',
+    R5: '无当前目录段（.）',
+    R6: '无 NUL 字节',
+    R7: '长度合法',
+    R8: '非 Windows 保留设备名',
+    R9: '无 Windows 非法字符',
+    R10: '不以空格或点结尾',
+    R11: '分隔符统一为 /',
+    R12: '无重复路径',
+  }
+
+  /** 路径不安全。\`rule\` 说明违反了哪一条，\`fatal\` 一律为 true（协议要求中止整个会话） */
+  class UnsafePathError extends Error {
+    constructor(rule, message, input) {
+      super(message)
+      this.name = 'UnsafePathError'
+      this.code = 'E_PATH_UNSAFE'
+      this.rule = rule
+      this.fatal = true
+      this.input = input
+    }
+  }
+
+  /** Windows 保留设备名。带扩展名也算（\`CON.txt\` 同样打不开） */
+  const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)/i
+  /** Windows 非法字符 */
+  const WIN_ILLEGAL = /[<>:"|?*]/
+  /** 单个路径段的最大字节数（多数文件系统的硬限制是 255 字节） */
+  const MAX_SEGMENT_BYTES = 255
+  /** 整体路径的最大字节数（协议 R7） */
+  const MAX_PATH_BYTES = 4096
+
+  /**
+   * 比较两个路径段时用的键。
+   *
+   * ⚠️ 三件事缺一不可，每一件都对应一种真实的丢文件方式：
+   *   ① \`normalize('NFC')\` —— macOS 上是 NFD，别处可能是 NFC，
+   *      不规范化就会把同一个文件认成两个（然后后者覆盖前者）
+   *   ② \`toLowerCase()\` —— Windows 与 macOS 默认大小写不敏感，
+   *      \`A.txt\` 与 \`a.txt\` 在那边是同一个文件
+   *   ③ 只用于**比较**，不改写要写盘的名字（用户看到的名字应当原样保留）
+   */
+  function compareKey(seg) {
+    // normalize 在个别老环境里可能缺失 —— 缺了就退化成原样比较，
+    // 而不是抛错把整条路堵死（宁可少一层保护，也不能发不出文件）
+    const s = typeof seg?.normalize === 'function' ? seg.normalize('NFC') : String(seg ?? '')
+    return s.toLowerCase()
+  }
+
+  /** 整个相对路径的比较键 */
+  function compareKeyOf(relPath) {
+    return relPath.split('/').map(compareKey).join('/')
+  }
+
+  /** UTF-8 字节数（浏览器里没有 Buffer，用 TextEncoder） */
+  function utf8Bytes(s) {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(s).length
+    // 极老的兜底：非 ASCII 一律按 3 字节乐观估计（只用于长度判断）
+    let n = 0
+    for (const ch of s) n += ch.codePointAt(0) < 0x80 ? 1 : 3
+    return n
+  }
+
+  // ── 极简 posix 路径工具（浏览器里没有 node:path）─────────────
+
+  function posixDirname(p) {
+    const i = p.lastIndexOf('/')
+    return i < 0 ? '.' : (i === 0 ? '/' : p.slice(0, i))
+  }
+
+  function posixBasename(p) {
+    const i = p.lastIndexOf('/')
+    return i < 0 ? p : p.slice(i + 1)
+  }
+
+  /** 扩展名（含点）；没有扩展名时返回 ''。与 node:path.posix.extname 同语义 */
+  function posixExtname(p) {
+    const base = posixBasename(p)
+    const i = base.lastIndexOf('.')
+    if (i <= 0) return ''
+    return base.slice(i)
+  }
+
+  // ── 规则本体 ────────────────────────────────────────────────
+
+  /**
+   * 校验并净化一个来自**不可信输入**的相对路径。
+   *
+   * 两种模式，差别**只有一处**（这一点刻意做小，免得"两种模式"变成两套规则）：
+   *
+   *   · \`strict: false\`（**发送端**扫自己的文件）：裸的 \`.\` 段直接折叠掉。
+   *     用户输入的 \`./dir/a.txt\` 是很自然的东西，没必要因此发不出去。
+   *   · \`strict: true\`（**接收端**校验清单）：裸的 \`.\` 段按协议 R5 直接拒绝。
+   *     发送端从不产生这种段，所以拒绝它不影响任何正常传输，只挡住手工构造的清单。
+   *
+   * **R9（非法字符）与 R10（结尾的点/空格）在两种模式下都是"改写"而不是"拒绝"** ——
+   * 这是想清楚才这么定的：Linux/macOS 上 \`a:b.txt\`、\`report.\` 都是合法文件名，
+   * 发送端按自己的平台规则看它们是正常的，于是原样写进清单。若接收端（Windows）
+   * 直接拒绝，一次**完全正常的传输**就会整个失败。所以接管方式是就地改写，
+   * 改写的**后果**（可能撞名）由 R12 的冲突检查兜住。
+   *
+   * @param {string} raw
+   * @param {object} [opts]
+   * @param {boolean} [opts.windows] 是否按 Windows 的规则（保留名、非法字符、结尾）
+   * @param {boolean} [opts.strict]
+   * @param {boolean} [opts.normalize] 是否把结果统一成 NFC（默认 true）
+   * @returns {string} 净化后的相对路径
+   */
+  function checkRelPath(raw, opts = {}) {
+    const win = opts.windows ?? false
+    const strict = opts.strict ?? false
+    const doNormalize = opts.normalize ?? true
+
+    if (typeof raw !== 'string' || raw.length === 0) {
+      throw new UnsafePathError('R6', '路径必须是非空字符串', raw)
+    }
+    if (raw.includes('\\0')) throw new UnsafePathError('R6', '路径含空字节', raw)
+
+    // ① 先归一化分隔符，再判断"是不是绝对路径" —— 顺序反了会被 a/./../b 这类输入绕过
+    let p = raw.replace(/\\\\/g, '/')
+
+    // ② 绝对路径 / 盘符 / UNC
+    if (p.startsWith('//')) throw new UnsafePathError('R3', \`拒绝 UNC 路径: \${raw}\`, raw)
+    if (p.startsWith('/')) throw new UnsafePathError('R1', \`拒绝绝对路径: \${raw}\`, raw)
+    // ⚠️ 盘符的判据是「单个字母 + 冒号 + 斜杠或结尾」。
+    //    只看"有没有冒号"会把 \`a:b.txt\` 误判成盘符 —— 而它是合法的文件名
+    //    （NTFS 交替数据流），实测很常见。
+    if (/^[a-zA-Z]:([/\\\\]|$)/.test(p)) throw new UnsafePathError('R2', \`拒绝盘符路径: \${raw}\`, raw)
+
+    // ③ 逐段
+    const parts = []
+    for (let seg of p.split('/')) {
+      if (seg === '') continue                                  // 折叠空段（a//b）
+      if (seg === '.') {
+        if (strict) throw new UnsafePathError('R5', \`拒绝当前目录段: \${raw}\`, raw)
+        continue
+      }
+      if (seg === '..') throw new UnsafePathError('R4', \`拒绝路径穿越: \${raw}\`, raw)
+
+      if (doNormalize && typeof seg.normalize === 'function') seg = seg.normalize('NFC')
+
+      if (win && WIN_RESERVED.test(seg)) {
+        // 保留名**不能**靠改名绕过：CON → _CON 会让用户以为收到了 \`CON\`，
+        // 而那个文件在 Windows 上根本打不开。直接报错、说清原因。
+        throw new UnsafePathError('R8', \`拒绝 Windows 保留设备名: \${seg}（这类名字在 Windows 上无法创建）\`, raw)
+      }
+      if (win) {
+        // 非法字符：改写，不拒绝（见上面的说明）
+        if (WIN_ILLEGAL.test(seg)) seg = seg.replace(/[<>:"|?*]/g, '_')
+        // 结尾的点与空格在 Windows 上会被**静默丢弃**：\`a.\` 与 \`a\` 变成同一个文件
+        const trimmed = seg.replace(/[. ]+$/, '')
+        if (trimmed !== seg) seg = trimmed || '_'
+      }
+      if (utf8Bytes(seg) > MAX_SEGMENT_BYTES) {
+        throw new UnsafePathError('R7',
+          \`单个路径段超过 \${MAX_SEGMENT_BYTES} 字节: \${seg}（\${utf8Bytes(seg)} 字节）\`, raw)
+      }
+      parts.push(seg)
+    }
+
+    if (parts.length === 0) throw new UnsafePathError('R5', \`路径净化后为空: \${raw}\`, raw)
+
+    const rel = parts.join('/')
+    if (utf8Bytes(rel) > MAX_PATH_BYTES) {
+      throw new UnsafePathError('R7', \`整体路径超过 \${MAX_PATH_BYTES} 字节: \${raw}\`, raw)
+    }
+    return rel
+  }
+
+  /**
+   * 宽松版：只净化、不抛错（发送端扫描自己的文件时用）。
+   * 真的净化不出来时**也要给一个安全的降级结果**。
+   *
+   * ⚠️ 降级路径本身必须也是安全的 —— 这里曾经写成
+   *    \`raw.replace(/\\\\/g,'/').replace(/^\\/+/,'')\`，把 \`../../evil.txt\` 原样返回。
+   *    也就是说"安全函数"在兜底时吐出了一个穿越路径。**降级不等于放弃检查**：
+   *    兜底这段照样要把 \`..\`、\`.\`、空段去掉。
+   */
+  function safeRelPath(raw, opts = {}) {
+    try {
+      return checkRelPath(raw, { ...opts, strict: false })
+    } catch {
+      const cleaned = String(raw ?? '')
+        .replace(/\\\\/g, '/')
+        .split('/')
+        .filter((s) => s !== '' && s !== '.' && s !== '..')
+        .join('/')
+        .replace(/^\\/+/, '')
+      return cleaned || 'unnamed'
+    }
+  }
+
+  /**
+   * R12：在**开传之前**找出"落盘后会撞在一起"的路径。
+   *
+   * 这一步是防**静默覆盖**的关键。比较用的是 \`compareKeyOf\`（NFC + 大小写折叠），
+   * 因为 Windows/macOS 的默认文件系统就是这样判重的：
+   * 两个不同的清单条目在那边会变成同一个文件，后写的把先写的覆盖掉 ——
+   * 用户看到"传输完成"，却少了一个文件，而且没有任何提示。
+   *
+   * @param {string[]} relPaths 已净化过的相对路径
+   * @returns {{key:string, paths:string[]}|null} 第一组冲突；没有冲突返回 null
+   */
+  function findPathConflict(relPaths) {
+    const seen = new Map()
+    for (const p of relPaths) {
+      const key = compareKeyOf(p)
+      if (seen.has(key)) {
+        const hit = seen.get(key)
+        if (hit === p) return { key, paths: [hit, p], exact: true }
+        return { key, paths: [hit, p], exact: false }
+      }
+      seen.set(key, p)
+    }
+    return null
+  }
+
+  /**
+   * 发送端用：为 \`relPath\` 找一个不与 \`taken\` 冲突的名字。
+   * \`a.txt\` → \`a (1).txt\`。\`taken\` 里放的是 \`compareKeyOf\` 的结果。
+   */
+  function dedupeRelPath(relPath, taken) {
+    const key = compareKeyOf(relPath)
+    if (!taken.has(key)) { taken.add(key); return relPath }
+    const dir = posixDirname(relPath)
+    const ext = posixExtname(relPath)
+    const base = posixBasename(relPath).slice(0, posixBasename(relPath).length - ext.length)
+    for (let i = 1; i < 10000; i++) {
+      const cand = \`\${dir === '.' ? '' : dir + '/'}\${base} (\${i})\${ext}\`
+      const ck = compareKeyOf(cand)
+      if (!taken.has(ck)) { taken.add(ck); return cand }
+    }
+    throw new Error(\`无法为 \${relPath} 找到不冲突的名字\`)
+  }
+
+  window.FlickerPaths = {
+    checkRelPath: checkRelPath,
+    safeRelPath: safeRelPath,
+    compareKeyOf: compareKeyOf,
+    findPathConflict: findPathConflict,
+    dedupeRelPath: dedupeRelPath,
+    UnsafePathError: UnsafePathError,
+    utf8Bytes: utf8Bytes,
+    PATH_RULES: PATH_RULES,
+  }
+})()
+</script>
+<!-- path-rules:end -->
+<!-- page-plugins:begin —— 这一整段由 gen/inline-plugins.mjs 生成，请勿手改 -->
+<!-- 没有启用任何页面插件（web/page-plugins.json 的清单是空的） -->
+<!-- page-plugins:end -->
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="inner">
+
+      <div class="brand">
+        <div class="logo">⚡</div>
+        <div>
+          <div class="brand-name" data-i18n="app.name">闪传</div>
+          <div class="brand-sub" data-i18n="app.tagline">一次性文件传输 · 用完即销毁</div>
+        </div>
+        <!-- 语言切换。按钮文字由 i18n 运行时填（显示"另一种语言"的名字），
+             所以这里留空、不写死 —— 写死的话切到英文后按钮还是中文。 -->
+        <button class="lang-switch" type="button" data-lang-switch title="English"></button>
+      </div>
+
+      <!-- ① 密码 -->
+      <section id="v-pw">
+        <h2 id="pw-title" data-i18n="recv.pw.title">对方想给你发文件</h2>
+        <p class="sub" data-i18n="recv.pw.sub">输入对方告诉你的一次性密码即可开始。传输完成后，密码和链接立即失效。</p>
+        <div class="files" id="pw-files"><div class="file"><div class="file-ic">🔒</div>
+          <div class="file-meta">
+            <div class="file-name" data-i18n="recv.pw.manifestLocked">文件清单已加密</div>
+            <div class="file-size" data-i18n="recv.pw.manifestHint">输入正确密码后才能看到</div>
+          </div></div></div>
+        <label class="fl" for="pw" data-i18n="recv.pw.label">一次性密码</label>
+        <div class="pw-wrap">
+          <input class="pw" id="pw" type="password" autocomplete="off"
+                 autocapitalize="off" autocorrect="off" spellcheck="false"
+                 data-i18n-attr="placeholder:recv.pw.placeholder" placeholder="输入对方给你的密码">
+          <button class="eye" id="eye" type="button" data-i18n-attr="aria-label:recv.pw.show" aria-label="显示密码">👁</button>
+        </div>
+        <button class="btn" id="btnStart" data-i18n="recv.pw.start">开始接收</button>
+        <p class="foot" data-i18n="recv.pw.foot">密码不会离开你的电脑 —— 它只用来核对双方是否一致</p>
+      </section>
+
+      <!-- ② 连接中 -->
+      <section id="v-busy" class="hide center">
+        <div class="big-ic" style="background:var(--accent-soft);color:var(--accent)">⚡</div>
+        <h2 id="busy-title" data-i18n="recv.busy.title">正在核对密码…</h2>
+        <p class="sub" id="busy-sub" data-i18n="recv.busy.sub">双方密码一致后才会开始传输</p>
+      </section>
+
+      <!-- ③ 传输中 -->
+      <section id="v-go" class="hide">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+          <div class="badge"><span class="pulse"></span><span id="go-state" data-i18n="recv.go.state">传输中</span></div>
+          <span style="font:500 12px/1 var(--sans);color:var(--text-faint)" data-i18n="recv.go.crypto">端到端加密 · AES-256-GCM</span>
+        </div>
+        <div class="stats" style="margin-bottom:13px">
+          <span><span data-i18n="recv.go.total">总进度</span> <b id="go-done">0 B</b> / <span id="go-total">—</span></span>
+          <span><b id="go-pct">0%</b></span>
+        </div>
+        <div class="bar"><i id="go-bar" style="width:0"></i></div>
+        <div class="cur-file">
+          <div class="top">
+            <div class="file-ic" id="cur-ic">📄</div>
+            <div class="nm" id="cur-name">—</div>
+            <div class="pc" id="cur-pct">0%</div>
+          </div>
+          <div class="bar thin"><i id="cur-bar" style="width:0"></i></div>
+        </div>
+        <div class="speed">
+          <div><div class="k" data-i18n="recv.go.speed">速度</div><div class="v blue" id="go-speed">—</div></div>
+          <div><div class="k" data-i18n="recv.go.elapsed">已用时间</div><div class="v" id="go-elapsed">0 秒</div></div>
+          <div><div class="k" data-i18n="recv.go.eta">剩余</div><div class="v" id="go-eta">—</div></div>
+        </div>
+        <div style="height:20px"></div>
+        <div class="note" id="go-note"><span class="i">💾</span><span id="go-note-txt">正在准备…</span></div>
+        <!-- 链路抖动时显示，避免"静默重试"看起来像卡死。
+             长传输里瞬时故障比"对方关掉程序"常见得多，用户需要知道程序还活着。 -->
+        <div class="note hide" id="reconnect" style="color:var(--text-dim)"></div>
+        <button class="btn danger" id="btnCancel" data-i18n="common.cancelDestroy">取消并销毁</button>
+      </section>
+
+      <!-- ④ 完成 -->
+      <section id="v-done" class="hide center">
+        <div class="big-ic ok">✓</div>
+        <h2 data-i18n="recv.done.title">传输完成</h2>
+        <p class="sub" id="done-sum">—</p>
+        <div class="files" id="done-files" style="text-align:left"></div>
+        <div class="destroyed" id="done-destroyed"></div>
+      </section>
+
+      <!-- ⑤ 出错 -->
+      <section id="v-err" class="hide center">
+        <div class="big-ic err">✕</div>
+        <h2 id="err-title" data-i18n="common.error">出错了</h2>
+        <p class="sub" id="err-msg">—</p>
+        <div class="note err hide" id="err-note"><span class="i">⚠️</span><span id="err-note-txt"></span></div>
+        <button class="btn hide" id="btnRetry" data-i18n="common.retry">重试</button>
+        <p class="foot" id="err-hint"></p>
+      </section>
+
+    </div>
+  </div>
+  <p class="foot" style="margin-top:16px" data-i18n="recv.titleDone">闪传 Flicker · 传输结束后本页将无法再次访问</p>
+</div>
+
+<script>
+'use strict';
+/* ============================================================
+   接收端逻辑
+   关键约束：密码永不出本机；所有解密在本地完成；不写任何持久化存储
+   ============================================================ */
+const SUITE = 'FLICKER/1';
+const $ = (id) => document.getElementById(id);
+// 文案：全部走 t()，不要在下面硬编码中文 ——
+// 硬编码的那些在英文界面里永远是中文，而中文界面完全看不出问题。
+// 运行时与文案表由 gen/inline-i18n.mjs 内联在本页 <head> 里。
+const t = (key, vars) => window.FlickerI18N.t(key, vars);
+const show = (id) => {
+  for (const s of ['v-pw','v-busy','v-go','v-done','v-err']) $(s).classList.toggle('hide', s !== id);
+};
+
+// 密码框的眼睛
+$('eye').addEventListener('click', () => {
+  const el = $('pw'); el.type = el.type === 'password' ? 'text' : 'password';
+});
+
+// ── 能力探测（永远实测 API，不猜浏览器名字）──────────────────
+const CAN_STREAM = typeof window.showSaveFilePicker === 'function';
+
+/**
+ * "能边收边写盘"却退化成"全收进内存"时的告警线。
+ *
+ * 这个数不是随便挑的：它同时用于
+ *   ① 浏览器根本不支持流式写盘（Firefox / Safari）
+ *   ② 浏览器支持、但**用户拒绝了写入权限**
+ * 两种情况后果一样 —— 全部内容会在内存里拼装，超过这条线就很可能中途失败。
+ * 所以两处共用同一个常量，免得以后只改了一处。
+ */
+const MEMORY_MODE_LIMIT = 900 * 1024 * 1024;
+
+/**
+ * 预取深度：同时有几块在路上。默认 6（= 用满浏览器给同一个源的 6 条连接）。
+ *
+ * ── 为什么要有它（2026-10 实测，\`_lab/bench-recv-rtt.mjs\`）──
+ * 真实页面 + 真 Edge + **双向**延迟中继，64 块 × 1 MiB，链路按本机实测的 29.5 MB/s 封顶：
+ *
+ *   往返 195 ms（跨网络）：逐块串行只有 **4.0 MB/s** —— 相邻两次取块间隔中位 261 ms，
+ *     其中真正算东西的只有约 20 ms，**其余全在等一个往返**。
+ *
+ * 同一套基准上的 A/B（RTT 195 ms，端到端 / 取块阶段）：
+ *
+ *   串行（pf=1）  4.1 / 4.2 MB/s
+ *   深度 4       14.0 / 15.2 MB/s
+ *   深度 6       17.0 / 19.3 MB/s   ← 默认
+ *
+ * 局域网同样受益（loopback 实测过：串行 174.7 MiB/s → 并发 8 时 226.3 MiB/s）。
+ *
+ * ── 硬约束：最多 6 ──
+ * 浏览器对同一个源最多开 **6 条并发连接**（实测：深度 6 时中继侧看到 7 条挂着的请求 =
+ * 6 条取块 + 1 条发送端的状态轮询；再往上加深度不会更快）。
+ *
+ * ── 内存上限 ──
+ * 深度 × 块大小 = 6 MiB（默认）。这是**硬的**：见 createPrefetcher 里那条
+ * "按挂起表大小封顶"的注释 —— 如果按"在飞请求数"封顶，已取回但没消费的块会无限堆积。
+ */
+const PREFETCH_MAX = 6;
+const PREFETCH_DEFAULT = 6;
+
+/**
+ * 从链接的 fragment 里读预取深度（\`…&pf=6\`）。
+ *
+ * 为什么允许覆盖：这是个**性能参数**，不是安全参数 —— 它不改变任何校验或顺序语义。
+ * 留一个开关是为了能在真机上 A/B（\`_lab/bench-recv-rtt.mjs\` 就靠它扫并发），
+ * 而不是为了给用户调参。非法值一律回落到默认，不做"尽力而为"的解析。
+ */
+function prefetchDepth(hash) {
+  const m = /(?:^|[#&])pf=(\\d{1,2})(?:&|$)/.exec(hash || '');
+  if (!m) return PREFETCH_DEFAULT;
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n < 1) return PREFETCH_DEFAULT;
+  return Math.min(PREFETCH_MAX, n);
+}
+
+/**
+ * 取块预取器：让网络那一半流水线化，但**不碰任何安全语义**。
+ *
+ * ── 只并行"取回来" ──
+ * 解密、逐块哈希校验、写盘、ack 全部留在调用方（receive 的循环里）**按序**做：
+ *   · 写盘必须按序 —— \`createWritable()\` 是顺序写，没有"从第 N 字节接着写"
+ *   · ack 的含义是"已收到 + 已校验 + 已写盘" —— 提前 ack 会让中继把还没落盘的块删掉
+ * 所以这个类只做一件事：把 \`getChunk(seq)\` 提前发出去、暂存结果、按序交货。
+ *
+ * ── 三条必须守住的性质（每一条都有测试）──
+ *   ① **内存有界**：挂起表最多 \`depth\` 项 = 最多 depth 块数据。
+ *      判据必须是**表的大小**：只数"在飞请求"的话，已经取回但调用方还没消费的块会无限堆积。
+ *   ② **错误按序抛出**：第 3 块坏了，不能连带把第 1、2 块的结果也丢掉 ——
+ *      错误必须等到消费到那一块时才抛（用户白等一轮是最不该有的体验）。
+ *   ③ **取消立即释放**：\`stop()\` 之后不再发起新请求，并立刻丢掉挂起表里的缓冲。
+ *      在飞的那些请求会自己结束（结果没人要，随 GC 走），**不会被当成未处理的拒绝**：
+ *      每个条目的 promise 都挂了 onRejected，永远以"成功"结算。
+ *
+ * @param {(seq:number)=>Promise<any>} fetchChunk 真正的取块函数（传输层）
+ * @param {number} depth 同时在飞的上限
+ */
+function createPrefetcher(fetchChunk, depth) {
+  /** seq → { data, error, promise, settle } —— 在飞与已取回未消费的都在这里 */
+  const pending = new Map();
+  let nextSeq = null;          // 下一个要排队的序号；null = 还没人告诉我们从哪开始
+  let stopped = false;
+
+  function pump() {
+    if (stopped || nextSeq === null) return;
+    // 这里数的是 pending.size（在飞 + 已取回未消费），不是"在飞数"
+    while (!stopped && pending.size < depth) {
+      const seq = nextSeq++;
+      const entry = { data: undefined, error: undefined, started: false };
+      // 每个条目自带一个"结算"句柄：stop() 要靠它把还在等的调用者叫醒。
+      // （第一版没有它，于是 stop() 之后正在 take() 的那个调用者**永远挂着** ——
+      //   测试里表现为整个测试进程超时，而不是某条断言失败。这类"卡住"最难查。）
+      entry.promise = new Promise((resolve) => { entry.settle = resolve; });
+      Promise.resolve()
+        .then(() => { entry.started = true; return fetchChunk(seq); })
+        .then((d) => { entry.data = d; entry.settle(); },
+          (e) => { entry.error = e; entry.settle(); });
+      pending.set(seq, entry);
+    }
+  }
+
+  return {
+    /** 按序号取一块。调用方**严格按序**调用；跳号表示那个文件被跳过了 */
+    async take(seq) {
+      if (nextSeq === null || seq > nextSeq) {
+        // 起点或跳号：丢掉比 seq 小的缓冲（内存立刻回来），并把起点挪过来
+        for (const k of [...pending.keys()]) if (k < seq) pending.delete(k);
+        nextSeq = seq;
+        pump();
+      }
+      const entry = pending.get(seq);
+      if (!entry) {
+        // 只有"调用方没按序"才会走到这里 —— 那是页面自己的 bug，必须显式报出来
+        throw Object.assign(new Error('取块调度越界: seq ' + seq), { code: 'PREFETCH_SEQ' });
+      }
+      await entry.promise;
+      pending.delete(seq);
+      pump();                       // 腾出来的位置马上补上
+      if (entry.error) throw entry.error;
+      return entry.data;
+    },
+    /**
+     * 取消：不再发起新请求，丢掉缓冲，并把还在等的那一次 take() 叫醒。
+     *
+     * 为什么必须叫醒：调用者可能正卡在 \`await take(seq)\` 上（用户点了取消，
+     * 而那一块还没回来）。不叫醒它就等于把接收循环永久挂住 ——
+     * 界面停在"正在接收"，既不失败也不结束。
+     */
+    stop() {
+      stopped = true;
+      for (const entry of pending.values()) {
+        entry.error = Object.assign(new Error('取块已取消'), { code: 'CANCELLED' });
+        entry.settle();
+      }
+      pending.clear();
+    },
+    /** 给测试看的读数：当前挂起表大小（在飞 + 已取回未消费） */
+    get pendingCount() { return pending.size; },
+  };
+}
+if (!CAN_STREAM) {
+  const warn = document.createElement('div');
+  warn.className = 'note warn';
+  // 文案走 t()，所以这里要带 data-i18n —— 否则切语言时这句不会跟着变。
+  // 用 data-i18n-html 是因为它含 <b> 标签。
+  warn.setAttribute('data-i18n', 'recv.go.noStreamWarn');
+  warn.setAttribute('data-i18n-html', '');
+  warn.innerHTML = '<span class="i">⚠️</span><span>' + t('recv.go.noStreamWarn') + '</span>';
+  $('v-pw').insertBefore(warn, $('v-pw').querySelector('label.fl'));
+}
+
+// ── 工具 ────────────────────────────────────────────────────
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const bytes = (n) => {
+  // 单位不翻译：KB/MB/GB 在两种语言里是一样的写法
+  if (n < 1024) return n + ' B';
+  const u = ['KB','MB','GB','TB']; let v = n / 1024, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + u[i];
+};
+// ⚠️ 计时文案必须走 t()：中文是「1 分 30 秒」，英文是 "1m 30s"，
+//    拼字符串拼不出来。见 web/i18n-strings.mjs 顶部关于占位符的说明。
+const dur = (s) => s < 60
+  ? t('common.seconds', { n: Math.round(s) })
+  : t('common.minutes', { n: Math.floor(s / 60) }) + ' ' + t('common.seconds', { n: Math.round(s % 60) });
+const ic = (name) => {
+  const e = (name.split('.').pop() || '').toLowerCase();
+  if (['mp4','mkv','mov','avi','webm'].includes(e)) return '🎬';
+  if (['jpg','jpeg','png','gif','webp','bmp','heic'].includes(e)) return '🖼️';
+  if (['mp3','wav','flac','m4a','ogg'].includes(e)) return '🎵';
+  if (['zip','rar','7z','tar','gz'].includes(e)) return '🗜️';
+  if (['pdf'].includes(e)) return '📄';
+  if (['doc','docx','txt','md'].includes(e)) return '📝';
+  if (['xls','xlsx','csv'].includes(e)) return '📊';
+  if (['exe','msi','dmg','appimage'].includes(e)) return '⚙️';
+  return '📄';
+};
+
+// 必须与 Node 端 suite/flicker1.js 完全一致 —— 任何差异都会导致解密失败
+const enc = new TextEncoder();
+const aadFor = (fileIndex, chunkIndex, totalChunks, plainLen) => {
+  const b = new Uint8Array(28);
+  const dv = new DataView(b.buffer);
+  dv.setBigUint64(0, BigInt(fileIndex));
+  dv.setBigUint64(8, BigInt(chunkIndex));
+  dv.setBigUint64(16, BigInt(totalChunks));
+  dv.setUint32(24, plainLen >>> 0);
+  return b;
+};
+const ivFor = (chunkIndex) => {
+  const b = new Uint8Array(12);
+  new DataView(b.buffer).setBigUint64(4, BigInt(chunkIndex));
+  return b;
+};
+const MANIFEST_AAD = enc.encode('flicker/1/manifest');
+const LABEL = { room: 'flicker/1/room', auth: 'flicker/1/auth', enc: 'flicker/1/enc' };
+
+// ── 会话状态 ────────────────────────────────────────────────
+let S = null;         // { keys, sid, manifest, info }
+let cancelled = false;
+let wroteSomething = false;   // 是否已经有文件落地（决定取消时怎么提示）
+
+/**
+ * 已完整收到并通过整体校验的文件下标（**按会话区分**）。
+ *
+ * 为什么要有它：传输失败后点"重试"时，不该把前面几十个已经落盘的文件重传一遍。
+ * 只做**文件粒度**的续传 —— 块粒度做不到，因为浏览器里
+ * \`createWritable()\` 是顺序写且每次调用会截断文件，没有"从第 N 字节接着写"。
+ *
+ * ⚠️ 必须按会话（房间名 / 源站）分开存：换一个链接进来如果还沿用旧的跳过集合，
+ *    会**跳过根本没收到的文件**，用户拿到的是残缺目录 —— 那是比"重传一遍"严重得多的错。
+ */
+let DONE_FILES = new Set();
+let fileDoneBytes = {};       // 已跳过文件的字节数，用于进度条
+let sessionTag = null;        // 当前会话标识；换了就清空上面的记录
+
+/** 会话变了就清空进度记录（在拿到清单、知道会话标识之后调用） */
+function resetProgressFor(tag) {
+  if (sessionTag === tag) return;
+  sessionTag = tag;
+  DONE_FILES = new Set();
+  fileDoneBytes = {};
+}
+
+/** 当前会话的标识：中继用房间名，局域网用源站 */
+function currentSessionTag() {
+  const r = readRelayParams();
+  return r ? 'relay:' + r.room : 'local:' + location.host;
+}
+
+async function deriveKeys(password, info) {
+  const salt = b64(info.salt);
+  const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const v = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: info.kdf.iterations }, base, 256);
+  const vKey = await crypto.subtle.importKey('raw', v, 'HKDF', false, ['deriveBits']);
+  const one = async (label) => crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode(label) }, vKey, 256);
+  const [room, auth, encKey] = await Promise.all([
+    one(LABEL.room), one(LABEL.auth), one(LABEL.enc),
+  ]);
+  return {
+    auth: await crypto.subtle.importKey('raw', auth, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
+    enc: await crypto.subtle.importKey('raw', encKey, { name: 'AES-GCM' }, false, ['decrypt']),
+  };
+}
+
+/**
+ * 握手 MAC 的输入 = **域分隔前缀** ‖ 挑战。
+ *
+ * ⚠️ 这不是可选的装饰，漏了它**局域网模式直接连不上**：
+ *    2026-10 演练时才发现的 —— 页面上只签了 \`challenge\` 本身，而发送端按
+ *    \`flicker/1/recv\\n\`（或 \`send\\n\`）作前缀算 MAC，两边永远对不上，
+ *    于是页面永远显示"密码不一致"。测试没发现，是因为
+ *    \`test/e2e.test.js\` 用的是 Node 侧那份**按协议写**的接收端，
+ *    而页面这套握手是**另写了一遍**的（这类"两份实现"正是本项目反复吃亏的地方）。
+ *
+ * 前缀里的 \`recv\` / \`send\` 是**方向绑定**：没有它，两个方向的 MAC 输入结构相同，
+ * 拿到一个方向的 MAC 就能往另一个方向重放（PROTOCOL.md §4.5 的 MAC_*_DOMAIN）。
+ *
+ * 必须与 \`src/suite/flicker1.js\` 的 \`macInput()\` 逐字节一致 ——
+ * \`test/receiver-page.test.js\` 有一条用例把它钉住了（两种构造都钉）。
+ *
+ * ── 两种构造（降级保护，2026-10）──
+ *   v2：\`套件id + "\\n" + 方向 + "\\n"\` —— 套件 id 被绑进被认证的材料
+ *   v1：\`"flicker/1/" + 方向 + "\\n"\`  —— 0.1.0 发布时的字节，只为了跟老发送端互通
+ * 发送端在 \`/api/auth/start\` 里**报价**支持哪些构造，页面挑第一个自己认识的，
+ * 并且**必须如实回执自己用了哪套** —— 回执与报价对不上时发送端会直接中止（防降级）。
+ * 页面这边也要用**同一个构造**去核对发送端的应答，否则双向认证就白做了。
+ */
+const MAC_PROFILES = ['v2', 'v1'];
+
+function macInput(role, challenge, profile = 'v2', suite = SUITE) {
+  const prefix = profile === 'v1' ? ('flicker/1/' + role + '\\n') : (suite + '\\n' + role + '\\n');
+  const domain = enc.encode(prefix);
+  const out = new Uint8Array(domain.length + challenge.length);
+  out.set(domain, 0);
+  out.set(challenge, domain.length);
+  return out;
+}
+
+/** 从发送端的报价里挑一个双方都认识的构造（报价缺失 = 老发送端 → v1） */
+function pickMacProfile(offered) {
+  if (!Array.isArray(offered)) return 'v1';
+  for (const p of MAC_PROFILES) if (offered.includes(p)) return p;
+  return 'v1';
+}
+
+// ── 通用网络重试 ────────────────────────────────────────────
+//
+// ⚠️ 这一层是**刚需**，不是锦上添花。
+//
+//    从前 fetch() 抛出的网络错误直接往上冒，一路走到"传输失败"——
+//    于是 Wi-Fi 抖一下、手机切个网、连接被重置，几十 GB 就白传了。
+//    而这类瞬时故障恰恰是长传输里最常见的失败原因（比"对方关掉程序"常见得多）。
+//
+//    只重试**瞬时**故障：网络层异常、超时、5xx、429。
+//    "房间没了"这类重试一万次也不会变出来，必须立刻报给用户。
+
+const NET = { retries: 6, baseMs: 400, maxMs: 8000 };
+
+/** 这个错误值不值得重试 */
+function isTransientNet(e, status) {
+  if (typeof status === 'number') return status >= 500 || status === 429;
+  const fatal = ['NO_ROOM', 'EXPIRED', 'GONE', 'PEER_AUTH', 'DECRYPT', 'CHUNK_HASH',
+    'LENGTH', 'BAD_LINK', 'RELAY_GONE', 'CANCELLED'];
+  if (e && typeof e.code === 'string' && fatal.includes(e.code)) return false;
+  if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return true;
+  if (e && e.name === 'TypeError') return true;      // fetch 的网络层失败
+  return false;
+}
+
+/** 把"正在重连"告诉用户 —— 沉默的重试会让人以为程序卡死了 */
+function noteRetry(label, attempt, max) {
+  if (typeof $ !== 'function') return;
+  const el = $('reconnect');
+  if (!el) return;
+  el.textContent = t('recv.go.reconnecting', { n: attempt, max });
+  el.classList.remove('hide');
+}
+
+function clearRetryNote() {
+  if (typeof $ !== 'function') return;
+  const el = $('reconnect');
+  if (el) el.classList.add('hide');
+}
+
+/**
+ * 指数退避重试。回调收到 attempt（0 为首次）。
+ * 退避 400ms 起、每次翻倍、封顶 8s，另加 0–300ms 抖动，
+ * 避免多个并发请求同时回来再撞一次。
+ */
+async function withRetry(label, fn) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= NET.retries; attempt++) {
+    try {
+      const r = await fn(attempt);
+      if (attempt > 0) clearRetryNote();
+      return r;
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientNet(e, e && e.status)) throw e;
+      if (attempt === NET.retries) break;
+      const wait = Math.min(NET.baseMs * 2 ** attempt, NET.maxMs) + Math.random() * 300;
+      noteRetry(label, attempt + 1, NET.retries);
+      await new Promise((x) => setTimeout(x, wait));
+    }
+  }
+  throw lastErr;
+}
+
+async function api(path, opts) {
+  const sep = path.includes('?') ? '&' : '?';
+  const url = path + (S?.sid ? sep + 'sid=' + encodeURIComponent(S.sid) : '');
+  const r = await withRetry('api', () => fetch(url, { cache: 'no-store', ...opts }));
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status, code = 'HTTP_' + r.status;
+    try { const j = await r.json(); msg = j.message || msg; code = j.error || code; } catch {}
+    const e = new Error(msg); e.code = code; e.status = r.status; throw e;
+  }
+  return r;
+}
+
+// ── 传输层适配器 ────────────────────────────────────────────
+//
+// 接收端有两条完全不同的数据通路，但**解密、校验、写盘完全一样**：
+//
+//   局域网模式：浏览器 ──HTTPS 直连──▶ 发送端 Node
+//               参数走 /api/session、认证走挑战—应答、数据走 /api/chunk?seq=N
+//
+//   中继模式  ：浏览器 ──HTTPS──▶ 中继（发送端已把密文放进去）
+//               参数与数据都在 /r/<房间名>?seq=N 上
+//
+// 所以把差异收在这一个很薄的对象里，主流程只调 getManifest() / getChunk(seq)。
+// **不做成两套流程** —— 那是这类功能最容易腐化的地方（改了一边忘了另一边）。
+
+/** 从 URL 的 fragment 里读出中继参数。fragment 不会发给服务器。 */
+function readRelayParams() {
+  const h = location.hash.replace(/^#/, '');
+  if (!h) return null;
+  const p = new URLSearchParams(h);
+  const room = p.get('k');     // 房间名（64 位十六进制，由密码派生）
+  const salt = p.get('s');     // 盐（十六进制）
+  if (!room || !salt) return null;
+  if (!/^[0-9a-f]{64}$/.test(room) || !/^[0-9a-f]{32}$/.test(salt)) return null;
+  return { room, salt };
+}
+
+/** 局域网模式：直连发送端 */
+function localTransport() {
+  return {
+    mode: 'local',
+    async prepare(password, deriveKeysFn) {
+      const info = await api('/api/session').then((r) => r.json());
+      const keys = await deriveKeysFn(password, info);
+
+      // 挑战—应答：证明我们知道密码，但密码本身不出门
+      const ch = await api('/api/auth/start', { method: 'POST' }).then((r) => r.json());
+      const challenge = b64(ch.challenge);
+      // 挑一个双方都认识的 MAC 构造，并且**如实回执**（防降级，见 macInput 的说明）
+      const profile = pickMacProfile(ch.macProfiles);
+      const mac = new Uint8Array(
+        await crypto.subtle.sign('HMAC', keys.auth, macInput('recv', challenge, profile)));
+      const fin = await api('/api/auth/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challenge: ch.challenge,
+          mac: btoa(String.fromCharCode(...mac)),
+          macProfile: profile,
+        }),
+      }).then((r) => r.json());
+
+      // 核对发送端的应答（双向认证：对方也必须证明它知道密码）。
+      // ⚠️ 用**发送端回执的那套构造**来核对，而不是我们自己挑的那套：
+      //    两边不一致本身就是异常，这时应当失败，而不是拿错的构造去比、
+      //    最后报一句让人误以为是密码问题的错误。
+      const senderProfile = typeof fin.macProfile === 'string' ? fin.macProfile : profile;
+      if (senderProfile !== profile) {
+        throw Object.assign(new Error(t('recv.msg.peerAuthFail')), { code: 'PEER_AUTH' });
+      }
+      const expect = new Uint8Array(
+        await crypto.subtle.sign('HMAC', keys.auth, macInput('send', challenge, profile)));
+      const got = b64(fin.mac);
+      if (expect.length !== got.length || !expect.every((v, i) => v === got[i])) {
+        throw Object.assign(new Error(t('recv.msg.peerAuthFail')), { code: 'PEER_AUTH' });
+      }
+      return { keys, sid: fin.sid, manifest: info.manifest, info };
+    },
+    /** 取一个分块：{ ct, tag } */
+    async getChunk(seq) {
+      const r = await api('/api/chunk?seq=' + seq);
+      return {
+        ct: new Uint8Array(await r.arrayBuffer()),
+        tag: b64(r.headers.get('X-Flicker-Tag')),
+      };
+    },
+    async done() { if (!cancelled) await api('/api/done', { method: 'POST' }); },
+  };
+}
+
+/**
+ * 中继模式：从房间里按序号取。
+ *
+ * 清单（seq 0）的负载是：salt(16) ‖ iv(12) ‖ tag(16) ‖ 密文
+ * 分块的负载是：tag(16) ‖ 密文
+ *
+ * ⚠️ 发送端是**按需投递**的，所以还没到的分块会得到 404 NOT_YET ——
+ *    那不是错误，是"稍等"。这里要重试，而不是报错。
+ */
+function relayTransport({ room, salt }) {
+  const url = (s = '') => \`/r/\${room}\${s}\`;
+  const RETRY_MS = 300, MAX_WAIT_MS = 120000;
+
+  // ⚠️ 中继上存的是**完整消息**：\`[类型字节][负载]\`（见 src/relay/protocol.js 的
+  //    packMessage）。所以取回来之后**必须先剥掉第 0 个字节**再切片。
+  //
+  //    从前这里直接在 raw 上切：\`raw.subarray(0,16)\` 当盐、\`(16,28)\` 当 IV、
+  //    \`(28,44)\` 当 tag、\`44..\` 当密文 —— 全部**差一个字节**。
+  //    症状是清单解密失败、界面上一句没法定位的"未知错误"，
+  //    而**整个浏览器中继接收路径从来就没成功过**。
+  //    长度检查倒是按 45 算的（1 类型 + 44 头），说明当初知道有这个字节，
+  //    只是切片时忘了跳。这类"知道一半"的错最容易被忽略。
+  const MSG_MANIFEST = 0x01, MSG_CHUNK = 0x02;
+
+  // ── ack：中继靠它把消息从队列里删掉，发送端靠它推进窗口 ──────
+  //
+  // ⚠️ 这里从前**根本没有 ack**（只有一句写着"接收端每取一块都会 ack"的注释）。
+  //    后果实测过，而且是三重的：
+  //      · 中继的队列永不回收 → \`ackedBase\` 一直是 0 → 发送端的在途计数
+  //        很快占满窗口 8 → 之后每次只敢"强制投 1 条"，速度掉到地板
+  //      · 发送端的完成判据是 \`ackedBase >= total\`，所以它永远等不到完成，
+  //        只能耗到空闲超时（默认 15 分钟）再报失败 —— 而文件其实已经收完了
+  //      · 队列里堆积的密文等于整个文件大小，中继内存随文件线性增长
+  //
+  //    做法上刻意**不在热路径上等待**：每块都 \`await\` 一个 ack 会多花一个往返，
+  //    跨网络时那正是最贵的东西。这里改成"记下最新的连续序号、后台合并发送"。
+  let ackedSeq = -1;      // 已经收到（且已校验写入）的最大序号
+  let lastSent = -1;      // 已经报给中继的最大序号
+  let sending = false;
+
+  async function flushAcks() {
+    if (sending) return;
+    sending = true;
+    try {
+      // 合并：期间 ackedSeq 可能又前进了，那就再把最新的报一次
+      while (ackedSeq > lastSent) {
+        const target = ackedSeq;
+        try {
+          const r = await fetch(url('/ack?upTo=' + target), { method: 'POST', cache: 'no-store' });
+          // 410 = 这一段已经被确认过了（幂等），当作成功
+          if (!r.ok && r.status !== 410) break;
+          lastSent = target;
+        } catch (e) {
+          break;                  // 网络抖动：留到下一次 flush
+        }
+      }
+    } finally { sending = false; }
+  }
+
+  /** 收到并处理完第 seq 块之后调用（不等待） */
+  function ackChunk(chunkSeq) {
+    // ⚠️ 要 ack 的是**消息序号**，不是块序号：清单占 \`seq 0\`，所以块 i 是 \`1 + i\`。
+    //    取块那边一直是对的（\`fetchSeq(1 + seq)\`），ack 这边从前漏了那个 +1 ——
+    //    于是最后一条确认永远差一位，中继的 ackedBase 停在 total-1，
+    //    而发送端的完成判据是 \`ackedBase >= total\`：**它永远等不到完成**，
+    //    只能耗到空闲超时。症状是"文件其实收完了，发送端却一直不结束"。
+    const seq = 1 + chunkSeq;
+    if (seq <= ackedSeq) return;
+    ackedSeq = seq;
+    flushAcks();
+  }
+
+  async function fetchSeq(seq) {
+    const deadline = Date.now() + MAX_WAIT_MS;
+    for (;;) {
+      // 网络错误也走重试 —— 原来这里没接住 fetch 抛出的异常，
+      // 于是连接一抖整个传输就结束了。
+      const r = await withRetry('chunk', () => fetch(url('?seq=' + seq), { cache: 'no-store' }));
+      if (r.ok) return new Uint8Array(await r.arrayBuffer());
+      let code = 'HTTP_' + r.status;
+      try { code = (await r.json()).error || code; } catch {}
+      if (code === 'NOT_YET') {
+        // 发送端还没投递到这一条 —— 正常，等它
+        if (Date.now() > deadline) {
+          throw Object.assign(new Error(t('recv.msg.relayTimeout')), { code: 'RELAY_TIMEOUT' });
+        }
+        await new Promise((x) => setTimeout(x, RETRY_MS));
+        continue;
+      }
+      if (code === 'NO_ROOM' || r.status === 404) {
+        throw Object.assign(new Error(t('recv.msg.relayGone')), { code: 'RELAY_GONE' });
+      }
+      if (code === 'GONE' || r.status === 410) {
+        throw Object.assign(new Error(t('recv.msg.relayTaken')), { code: 'RELAY_GONE' });
+      }
+      // 5xx / 429 值得再试一轮，其余直接报错
+      if (isTransientNet(null, r.status)) { await new Promise((x) => setTimeout(x, RETRY_MS)); continue; }
+      const e = new Error(t('recv.msg.relayStatus', { status: r.status })); e.code = code; e.status = r.status; throw e;
+    }
+  }
+
+  return {
+    mode: 'relay',
+    async prepare(password, deriveKeysFn) {
+      const msg = await fetchSeq(0);
+      if (msg.length < 1 + 44) {
+        throw Object.assign(new Error(t('recv.msg.badManifest')), { code: 'RELAY_BAD_MANIFEST' });
+      }
+      if (msg[0] !== MSG_MANIFEST) {
+        throw Object.assign(new Error(t('recv.msg.badManifest')), { code: 'RELAY_BAD_MANIFEST' });
+      }
+      const raw = msg.subarray(1);           // ← 剥掉类型字节（这一行是修好的关键）
+      const saltBytes = raw.subarray(0, 16), iv = raw.subarray(16, 28);
+      const tag = raw.subarray(28, 44), ct = raw.subarray(44);
+      void saltBytes;
+
+      // 用**链接里带来的盐**派生密钥。
+      // ⚠️ 盐来自 URL 的 fragment（# 之后），浏览器不会把它发给服务器 ——
+      //    所以中继连密钥派生的输入都看不到。这不是洁癖：盐若走消息体，
+      //    中继就掌握了派生的全部输入，只剩密码一道防线。
+      const plainSalt = Uint8Array.from(salt.match(/../g).map((h) => parseInt(h, 16)));
+      const kdfIterations = 600000;   // 必须与 FLICKER/1 套件一致
+      if (plainSalt.length !== 16) {
+        throw Object.assign(new Error(t('recv.msg.badSalt')), { code: 'BAD_LINK' });
+      }
+      const keys = await deriveKeysFn(password, {
+        salt: btoa(String.fromCharCode(...plainSalt)),
+        kdf: { iterations: kdfIterations },
+      });
+
+      const joined = new Uint8Array(ct.length + tag.length);
+      joined.set(ct); joined.set(tag, ct.length);
+      return {
+        keys,
+        sid: null,
+        manifest: { iv: btoa(String.fromCharCode(...iv)), ct: btoa(String.fromCharCode(...ct)), tag: btoa(String.fromCharCode(...tag)) },
+        info: { manifest: null },
+        _joined: joined,
+      };
+    },
+    async getChunk(seq) {
+      const msg = await fetchSeq(1 + seq);
+      // 同样的坑：\`[类型字节][tag(16)][密文]\` —— 一起剥掉
+      if (msg.length < 1 + 17 || msg[0] !== MSG_CHUNK) {
+        throw Object.assign(new Error(t('recv.msg.badChunk')), { code: 'RELAY_BAD_CHUNK' });
+      }
+      const raw = msg.subarray(1);
+      return { tag: raw.subarray(0, 16), ct: raw.subarray(16) };
+    },
+    /** 一块校验通过并写入之后确认。主流程调用，不 await。 */
+    ack: ackChunk,
+    async done() {
+      // 中继模式没有"完成"端点。收尾要做的是**把最后的 ack 送到**：
+      // 发送端的完成判据是 \`ackedBase >= total\`，少报一条它就会一直等到超时。
+      // 所以这里重试几次，而不是发一次就算。
+      for (let i = 0; i < 8 && lastSent < ackedSeq; i++) {
+        await flushAcks();
+        if (lastSent >= ackedSeq) break;
+        await new Promise((x) => setTimeout(x, 300));
+      }
+      // 不主动销毁房间 —— 让发送端决定何时销毁
+    },
+  };
+}
+
+/** 按链接判断该用哪条通路 */
+function pickTransport() {
+  const r = readRelayParams();
+  if (r) return relayTransport(r);
+  return localTransport();
+}
+
+// ── 主流程 ──────────────────────────────────────────────────
+async function start() {
+  const password = $('pw').value;
+  if (!password) { $('pw').focus(); return; }
+  cancelled = false;
+  $('btnStart').disabled = true;
+
+  try {
+    const transport = pickTransport();
+    show('v-busy');
+    $('busy-title').textContent = transport.mode === 'relay'
+    ? t('recv.busy.relayParams') : t('recv.busy.localParams');
+    $('busy-sub').textContent = transport.mode === 'relay'
+      ? t('recv.go.relayNote')
+      : '';
+
+    $('busy-title').textContent = t('recv.busy.title');
+    $('busy-sub').textContent = t('recv.busy.localCalc');
+    const sess = await transport.prepare(password, deriveKeys);
+
+    // 解密清单 —— 到这一步才第一次看到文件名
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64(sess.manifest.iv), additionalData: MANIFEST_AAD, tagLength: 128 },
+      sess.keys.enc, (() => {
+        const ct = b64(sess.manifest.ct), tag = b64(sess.manifest.tag);
+        const out = new Uint8Array(ct.length + tag.length);
+        out.set(ct); out.set(tag, ct.length);
+        return out;
+      })());
+    const wire = JSON.parse(new TextDecoder().decode(plain));
+
+    // ── 页面插件：密码核对通过、清单也解开了 ──────────────────
+    // ⚠️ 一律用 \`window.FlickerPage?.emit(...)\`：没有启用任何页面插件时，
+    //    页面里根本不内联运行时（\`gen/inline-plugins.mjs\` 空清单只放两个 marker），
+    //    于是这里就是一句空操作 —— 不为用不到的功能付代价。
+    //    页面插件的错误**不会**中断传输（见 web/page-plugin-runtime.mjs 的说明）。
+    window.FlickerPage?.emit('recv/verified', Object.freeze({
+      fileCount: wire.files.length,
+      totalBytes: wire.totalBytes,
+      files: Object.freeze(wire.files.map((f) => Object.freeze({ name: f.rel, size: f.size }))),
+    }));
+
+    S = { keys: sess.keys, sid: sess.sid, manifest: wire, info: sess.info, transport };
+    renderManifest(wire);
+    await receive(wire);
+  } catch (err) {
+    fail(err);
+  }
+}
+
+function renderManifest(wire) {
+  const box = $('pw-files');
+  box.innerHTML = '';
+  for (const f of wire.files.slice(0, 8)) {
+    const d = document.createElement('div');
+    d.className = 'file';
+    const n = document.createElement('div'); n.className = 'file-ic'; n.textContent = ic(f.rel);
+    const m = document.createElement('div'); m.className = 'file-meta';
+    const a = document.createElement('div'); a.className = 'file-name'; a.textContent = f.rel;
+    const b = document.createElement('div'); b.className = 'file-size'; b.textContent = bytes(f.size);
+    m.append(a, b); d.append(n, m); box.append(d);
+  }
+  if (wire.files.length > 8) {
+    const d = document.createElement('div'); d.className = 'file';
+    d.innerHTML = '<div class="file-ic">…</div><div class="file-meta">' +
+      '<div class="file-name">' + t('recv.msg.moreFiles', { n: wire.files.length - 8 }) + '</div></div>';
+    box.append(d);
+  }
+  const sum = document.createElement('div');
+  sum.className = 'file-sum';
+  sum.innerHTML = '<span>' + t('recv.msg.fileCount', { n: wire.files.length }) + '</span><span><b>' +
+    bytes(wire.totalBytes) + '</b></span>';
+  box.append(sum);
+
+  $('pw-title').textContent = t('recv.msg.wantSend', { n: wire.files.length });
+}
+
+// ── 接收 ────────────────────────────────────────────────────
+async function receive(wire) {
+  // ⚠️ 第一件事：把全部路径过一遍规则并查冲突。**必须在 show('v-go') 之前** ——
+  //    有问题就直接报错、一个字节都不传，而不是传到一半才发现要覆盖文件。
+  //    抛出的错误由调用方（收到清单之后的那段）统一显示。
+  const safeRels = validatePaths(wire);
+
+  show('v-go');
+  const t0 = performance.now();
+  const total = wire.totalBytes;
+  let done = 0;
+
+  // 会话变了（换了链接）就作废上一次的进度记录
+  resetProgressFor(currentSessionTag());
+  // 注意：这里**不**预先把已跳过文件的字节数加进 done ——
+  //       下面文件循环的跳过分支会自己累加。两处都加就会重复计算。
+
+  $('go-total').textContent = bytes(total);
+
+  // 大文件 + 不支持流式写盘 → 提前警告（别让他传到一半才失败）
+  if (!CAN_STREAM && total > MEMORY_MODE_LIMIT) {
+    $('go-note').className = 'note warn';
+    $('go-note-txt').innerHTML = t('recv.go.bigWarn', { size: bytes(total) });
+  } else {
+    $('go-note-txt').innerHTML = CAN_STREAM
+      ? t('recv.go.streamNote')
+      : t('recv.go.blobNote');
+  }
+
+  // 选保存目录（只问一次，之后所有文件都放这里）
+  //
+  // 三种结果要分开处理 —— 从前它们被合并成一句"退化到逐个文件询问"，
+  // 于是**拒绝授权**这条最危险的路被静默吞掉了（2026-10 复查发现）：
+  //   · AbortError      = 用户点了"取消"        → 干净地中止（不传了，符合预期）
+  //   · NotAllowedError = 用户点了"拒绝"        → 关键分支，见下
+  //   · 其他            = 环境不支持            → 回退，正常
+  //
+  // 为什么"拒绝"危险：拒绝之后写盘这条路就没了，页面会退到**内存里拼装**。
+  // 小文件没事；但几十 GB 会先把浏览器撑爆 —— 而且是**传到一半**才爆，
+  // 那时候用户已经等了很久。更糟的是这种情况**不会**触发那句
+  // "你的浏览器不支持流式写盘"的警告（浏览器本身支持，是权限没给）。
+  // 所以这里必须自己判断并说清楚。
+  let dirHandle = null;
+  if (CAN_STREAM && wire.files.length >= 1) {
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'flicker-out' });
+    } catch (e) {
+      if (e && e.name === 'AbortError') { return cancelled = true, finished(true); }
+      dirHandle = null;
+      // 没给写入权限就不是 AbortError（Chromium 给的是 NotAllowedError/SecurityError）。
+      // 大文件直接**明确失败**，而不是"先收进内存、传到一半崩掉" ——
+      // 现在说清楚，用户重来一次只要多按一个"允许"；传到一半再崩，代价是重传。
+      const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      if (denied && total > MEMORY_MODE_LIMIT) {
+        const err = new Error('dir permission denied')
+        err.code = 'NO_WRITE_PERMISSION'
+        err.params = { size: bytes(total) }
+        throw err
+      }
+      if (denied) {
+        // 小文件：继续走内存，但要把"接下来会发生什么"写明白
+        $('go-note').className = 'note warn';
+        $('go-note-txt').innerHTML = t('recv.go.noPermissionWarn', { size: bytes(total) });
+      }
+    }
+  }
+
+  let lastTick = performance.now(), lastBytes = 0, speed = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    const dt = (now - lastTick) / 1000;
+    if (dt >= 0.5) {
+      const inst = (done - lastBytes) / dt;
+      speed = speed ? speed * 0.6 + inst * 0.4 : inst;
+      lastTick = now; lastBytes = done;
+      $('go-speed').textContent = bytes(speed) + '/s';
+      const el = (now - t0) / 1000;
+      $('go-elapsed').textContent = dur(el);
+      $('go-eta').textContent = speed > 1024 ? t('recv.msg.about', { time: dur((total - done) / speed) }) : '—';
+    }
+  }, 500);
+
+  // ⚠️ 块的全局序号由**接收端自己累加**，不依赖清单里的 \`firstChunk\`。
+  //
+  //    理由不是洁癖：那个字段曾经只在发送端的"带赠品"分支里被赋值，
+  //    于是 \`--no-gift\` 或赠品生成失败时它根本不存在，\`f.firstChunk + ci\`
+  //    算出 \`NaN\`，一个块都取不到（界面上只报一句"传输中断"）。
+  //    序号本来就是 \`chunks\` 的前缀和，自己算既便宜又不会被对端漏字段坑到。
+  {
+    let ord = 0;
+    for (const f of wire.files) { f._first = ord; ord += f.chunks; }
+  }
+
+  // 取块预取：把"一块一个往返"变成"几块同时在飞"（见 createPrefetcher 的说明）。
+  //
+  // ⚠️ 只有**取块**被提前了。解密、逐块校验、写盘、ack 仍然在下面这个循环里
+  //    按序一件件做 —— 顺序写盘与"写盘后才 ack"这两条语义一个字都没改。
+  //    出错的块也一样：错误存在它自己的条目里，等循环走到那一块时才抛。
+  const prefetch = createPrefetcher(
+    (s) => S.transport.getChunk(s), prefetchDepth(location.hash));
+
+  try {
+    for (let fi = 0; fi < wire.files.length; fi++) {
+      if (cancelled) break;
+      const f = wire.files[fi];
+
+      // ⚠️ 已经完整收到并**通过整体校验**的文件，直接跳过。
+      //
+      //    用途：传输失败后点"重试"时，不必把前面几十个已经落盘的文件重传一遍。
+      //    判据只能是"整体校验通过" —— 半途而废的文件**不能**跳过：
+      //    浏览器里 \`createWritable()\` 是顺序写且每次调用会截断文件，
+      //    没有"从第 N 字节接着写"的能力（见 openSink 的注释），
+      //    所以只做文件粒度的续传，不做块粒度的。
+      if (DONE_FILES.has(fi)) {
+        fileDoneBytes[fi] = f.size;
+        done += f.size;
+        continue;
+      }
+      $('cur-ic').textContent = ic(f.rel);
+      $('cur-name').textContent = f.rel;
+
+      const { sink, close, streaming } = await openSink(f, dirHandle, wire.files.length, safeRels[fi]);
+      const streamingSink = streaming === true;
+      const fileHasher = createFileHasher();   // 整文件增量摘要（Worker 优先，见下）
+      let fileDone = 0;
+      let digest = null;
+
+      try {
+        for (let ci = 0; ci < f.chunks; ci++) {
+          if (cancelled) throw Object.assign(new Error(t('recv.err.CANCELLED.t')), { code: 'CANCELLED' });
+          const seq = f._first + ci;      // 自己累加的前缀和，见上面那段说明
+          const plainLen = Math.min(f.chunkBytes, f.size - ci * f.chunkBytes);
+          // 走传输层：局域网模式下直连发送端，中继模式下从中继取。
+          // 走预取器：真正发请求的是它，这里只是按序把已经取回来的那一块拿走。
+          const chunk = await prefetch.take(seq);
+          const ct = chunk.ct, tag = chunk.tag;
+          const joined = new Uint8Array(ct.length + tag.length);
+          joined.set(ct); joined.set(tag, ct.length);
+
+          let pt;
+          try {
+            pt = new Uint8Array(await crypto.subtle.decrypt(
+              { name: 'AES-GCM', iv: ivFor(ci), additionalData: aadFor(fi, ci, f.chunks, plainLen), tagLength: 128 },
+              S.keys.enc, joined));
+          } catch {
+            throw Object.assign(new Error(
+              t('recv.msg.decryptFail', { n: ci + 1 })),
+            { code: 'DECRYPT' });
+          }
+          if (pt.length !== plainLen) {
+            throw Object.assign(new Error(t('recv.msg.lengthMismatch', { n: ci + 1 })), { code: 'LENGTH' });
+          }
+          // 逐块校验：与清单里的块哈希比对
+          if (f.chunkHashes && f.chunkHashes[ci]) {
+            const h = await sha256hex(pt);
+            if (h !== f.chunkHashes[ci]) {
+              throw Object.assign(new Error(t('recv.msg.chunkHashFail', { n: ci + 1 })),
+                { code: 'CHUNK_HASH' });
+            }
+          }
+          await sink.write(pt);
+          // 整文件摘要交给 Worker 算（见 createFileHasher 的说明）：
+          // 这一行是接收端主线程上**最大**的一笔 CPU（1 MiB ≈ 4 ms、2 MiB ≈ 8 ms），
+          // 而它与后面的写盘/取块完全无关，没有理由占着主线程。
+          // ⚠️ 顺序仍然是"写完再交出去"：Blob 回退路径会**保留这个视图**，
+          //    所以只有流式写盘那条路才允许零拷贝转移（streaming 参数就是干这个的）。
+          fileHasher.update(pt, { transferable: streamingSink });
+          // ⚠️ 确认必须在**写入之后**：中继收到 ack 就会把这条从队列里删掉，
+          //    所以 ack 的含义是"已收到 + 已校验 + 已写盘"，不是"已收到"。
+          //    顺序反了的话，中途失败的那一块就再也取不回来了。
+          S.transport.ack?.(seq);
+          wroteSomething = true;
+          // ⚠️ 用 plainLen 而不是 pt.length：上一步可能已经把 pt 的底层缓冲**转移**给
+          //    Worker（转移之后视图长度会变成 0），拿它累加就会把进度算少。
+          fileDone += plainLen; done += plainLen;
+          paintProgress(f, fileDone, done, total);
+        }
+        paintProgress(f, fileDone, done, total, true);   // 收尾补一次，保证显示到 100%
+        // ⚠️ 摘要在 close() 之前取（它不依赖 close），而 dispose 放在 finally 里 ——
+        //    出错/取消时也要把 Worker 收掉，否则每传一个文件就漏一个线程。
+        digest = await fileHasher.digest();
+      } finally {
+        await close();
+        fileHasher.dispose();
+      }
+
+      // 整体校验 —— 传输可信的最终证据
+      f._ok = f.sha256 ? digest === f.sha256 : null;
+      if (f._ok === false) {
+        throw Object.assign(new Error(
+          t('recv.msg.fileHashFail', { name: f.rel })),
+        { code: 'HASH' });
+      }
+      // 这个文件已经完整、已校验、已落盘 —— 记下来，重试时不再重传
+      DONE_FILES.add(fi);
+      fileDoneBytes[fi] = f.size;
+      // 页面插件：单个文件收完（校验通过、已落盘）
+      window.FlickerPage?.emit('recv/file-done', Object.freeze({ name: f.rel, size: f.size }));
+    }
+    if (!cancelled) await S.transport.done();
+  } finally {
+    clearInterval(timer);
+    // 预取器必须一起停：失败/取消时它会继续把后面的块取回来，
+    // 既浪费带宽也占着内存（最多 depth 块）。
+    prefetch.stop();
+  }
+
+  if (cancelled) return finished(true);
+  finished(false, wire, ((performance.now() - t0) / 1000));
+}
+
+/**
+ * 整文件增量摘要：优先放进 **Web Worker**，拿不到就退回主线程。
+ *
+ * ── 为什么（2026-10 实测，\`_lab/bench-lan-page.mjs\`：真页面直连发送端，中继不在路径上）──
+ * 接收端在这台机器上的天花板是 **~130 MB/s ≈ 1.04 Gbps**，而它**不是**网卡或发送端造成的：
+ *   · 走真实 2.5 GbE 网卡只比回环慢 4%（回环 128.6、网卡 123.0 MB/s）；
+ *   · 发送端自己在该链路上能跑 250+ MiB/s；
+ *   · 预取开着或关掉几乎没差别（128.6 vs 127.6）—— 说明时间全花在**消费循环的 CPU** 上；
+ *   · 块大小 1/2/4 MiB 只差 117/128/132 —— 说明卡的是**每字节**的 CPU，不是每块的固定开销。
+ * 这笔 CPU 里最大的一项就是这里的整文件 SHA-256（纯 JS，实测 252 MiB/s，
+ * 1 MiB 块约 4 ms、2 MiB 块约 8 ms），而它与写盘、取块完全无关 —— 没理由占着主线程。
+ *
+ * ── 为什么只搬"整文件摘要"，不搬逐块校验 ──
+ * 逐块那一条走的是 \`crypto.subtle.digest\`（原生、本来就不在主线程上算）✓
+ * 只有"边收边算的整文件摘要"必须是纯 JS —— \`subtle.digest\` 没有增量接口。
+ *
+ * ── 源码只有一份 ──
+ * Worker 的脚本是**从页面自己的实现拼出来的**：\`K256\` 由运行时那个数组还原成源码，
+ * 类体直接取 \`Sha256.toString()\`。所以 Worker 里跑的与主线程退回路径用的是**同一个类**，
+ * 不会出现"两份实现算出的摘要不一样"这种最难查的问题。
+ *
+ * ── 拿不到 Worker 时 ──
+ * 退回主线程（行为与从前完全一致，只是慢）。CSP、老浏览器、创建失败都走这条路 ——
+ * **功能不能因为一个优化而消失**。
+ */
+/**
+ * 拼出摘要 Worker 的脚本源码。
+ *
+ * ⚠️ **源码只有一份**：\`K256\` 从运行时那个数组还原成源码、类体直接取
+ *    \`Sha256.toString()\` —— Worker 里跑的就是页面里这个类本身。
+ *    如果在这里手抄一份实现，迟早会出现"两份实现算出的摘要不一样"，
+ *    而它的症状是"文件明明完好却报校验失败"，极难排查。
+ *
+ * 单独抽成函数是为了**可测**：\`test/receiver-hash-worker.test.js\` 会把这段源码
+ * 取出来在 Node 里真的跑一遍，并与 \`node:crypto\` 的结果逐位比对。
+ */
+function buildHashWorkerSource() {
+  return [
+    'const K256 = new Uint32Array([' + Array.from(K256).join(',') + ']);',
+    Sha256.toString(),
+    'let h = new Sha256();',
+    'self.onmessage = (e) => {',
+    '  const d = e.data;',
+    '  if (d.reset) { h = new Sha256(); return; }',
+    '  if (d.buf) h.update(new Uint8Array(d.buf));',
+    '  if (d.finish) { const hex = h.digest(); h = new Sha256(); self.postMessage({ id: d.id, hex }); }',
+    '};',
+  ].join('\\n');
+}
+
+// 整页**共用一个** Worker：它本身不持有跨文件的状态（每份摘要取完即重置），
+// 每个文件新建一个既浪费（一传 100 个文件就建 100 个线程），
+// 还会多出 100 个 \`blob:\` 对象 —— 连验证脚本的探针都会被它们误导（实测踩过）。
+const hashWaiters = new Map();     // id → { res, rej }
+let hashWorker = null;
+let hashWorkerFailed = false;
+let hashSeq = 0;
+
+function getHashWorker() {
+  if (hashWorker || hashWorkerFailed) return hashWorker;
+  try {
+    const url = URL.createObjectURL(new Blob([buildHashWorkerSource()], { type: 'text/javascript' }));
+    const w = new Worker(url);
+    URL.revokeObjectURL(url);          // 建好就可以放掉这个 URL
+    w.onmessage = (e) => {
+      const wait = hashWaiters.get(e.data?.id);
+      if (wait) { hashWaiters.delete(e.data.id); wait.res(e.data.hex); }
+    };
+    w.onerror = () => {
+      // 运行期出错：**不能**悄悄算出一个错的摘要（那会被当成"文件损坏"）。
+      // 明确失败，并让后续文件退回主线程。
+      hashWorkerFailed = true;
+      for (const [id, wait] of hashWaiters) {
+        hashWaiters.delete(id);
+        wait.rej(Object.assign(new Error('摘要 Worker 出错'), { code: 'HASH_WORKER' }));
+      }
+      try { w.terminate() } catch { /* 忽略 */ }
+      hashWorker = null;
+    };
+    hashWorker = w;
+  } catch {
+    hashWorkerFailed = true;           // CSP 不允许 blob worker、或环境不支持
+  }
+  return hashWorker;
+}
+
+function createFileHasher() {
+  const w = getHashWorker();
+  if (!w) {
+    // 退回主线程：行为与从前完全一致（只是慢）。功能不能因为一个优化而消失。
+    const local = new Sha256();
+    try { window.__hashMode = 'main' } catch { /* 仅为排查方便 */ }
+    return {
+      update(u8) { local.update(u8) },
+      async digest() { return local.digest() },
+      dispose() { /* 主线程版没有需要释放的东西 */ },
+    };
+  }
+  try { window.__hashMode = 'worker' } catch { /* 忽略 */ }
+  w.postMessage({ reset: true });      // 上一个文件若半途中止，这里清干净
+
+  return {
+    /**
+     * 喂一块明文。
+     * @param {Uint8Array} u8
+     * @param {{transferable?:boolean}} [o] \`transferable: true\` 表示这块数据的缓冲
+     *   此后不再被使用（流式写盘那条路），可以**零拷贝转移**给 Worker；
+     *   Blob 回退路径会保留这个视图（最后拼 Blob），所以必须传 false —— 我们复制一份再转移。
+     */
+    update(u8, o = {}) {
+      let buf = u8.buffer;
+      const whole = u8.byteOffset === 0 && u8.byteLength === buf.byteLength;
+      if (!o.transferable || !whole) buf = u8.slice().buffer;   // 复制一份，别动原数据
+      w.postMessage({ buf }, [buf]);
+    },
+    /** 取整文件摘要（十六进制）。必须在 dispose() 之前调用 */
+    async digest() {
+      const id = ++hashSeq;
+      const p = new Promise((res, rej) => hashWaiters.set(id, { res, rej }));
+      w.postMessage({ finish: true, id });
+      return p;
+    },
+    dispose() { /* Worker 是共用的，不在这里终止（下一个文件还要用） */ },
+  };
+}
+
+/**
+ * 进度条的刷新节流。
+ *
+ * 从前的写法是**每收一块就写 5 个 DOM**（两个宽度 + 三段文字）。2 MiB 的块、
+ * 130 MB/s 时那是每秒 65 次；看起来不多，但每次都会碰样式与文字布局，
+ * 而这条循环正是天花板所在（见 createFileHasher 的实测）。改成"最多每 100ms 一次"，
+ * 收尾时强制刷一次 —— 显示仍然会走到 100%，只是中间少画几十帧。
+ */
+let lastPaintAt = 0;
+function paintProgress(file, fileDone, done, total, force = false) {
+  const now = performance.now();
+  if (!force && now - lastPaintAt < 100) return;
+  lastPaintAt = now;
+  const fp = file.size ? Math.floor(fileDone / file.size * 100) : 100;
+  $('cur-bar').style.width = fp + '%';
+  $('cur-pct').textContent = fp + '%';
+  const pct = total ? Math.floor(done / total * 100) : 100;
+  $('go-bar').style.width = pct + '%';
+  $('go-pct').textContent = pct + '%';
+  $('go-done').textContent = bytes(done);
+}
+
+// 增量 SHA-256
+// ============// 为什么不用 crypto.subtle.digest：它**没有流式接口**，
+// 必须一次性拿到全部字节，那就等于把整个文件留在内存里 ——
+// 正好破坏"大文件不爆内存"这个核心承诺。
+// 所以这里实现一个真正的增量版本：状态只有 H[8] + 64 字节缓冲，
+// 内存占用恒定，几十 GB 的文件也能边收边算。
+// 算法出自 FIPS 180-4，实现直白，便于逐行核对。
+const K256 = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+
+class Sha256 {
+  constructor() {
+    this.H = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    this.buf = new Uint8Array(64);
+    // ⚠️ 消息扩展的临时数组**必须复用**，不能在 _block 里每次新建。
+    //    见 _block 上方的说明 —— 这一处就是 2.3 倍的差距。
+    this.w = new Uint32Array(64);
+    this.bufLen = 0;
+    this.total = 0;                 // 已处理字节数（用 Number 足够：2^53 字节）
+  }
+  update(u8) {
+    this.total += u8.length;
+    let off = 0;
+    // 先把上次留下的半个块填满
+    if (this.bufLen > 0) {
+      const need = 64 - this.bufLen;
+      const take = Math.min(need, u8.length);
+      this.buf.set(u8.subarray(0, take), this.bufLen);
+      this.bufLen += take; off = take;
+      if (this.bufLen === 64) { this._block(this.buf, 0); this.bufLen = 0; }
+    }
+    // 整块直接处理，不复制
+    while (off + 64 <= u8.length) { this._block(u8, off); off += 64; }
+    // 尾巴留到下次
+    if (off < u8.length) {
+      this.buf.set(u8.subarray(off), 0);
+      this.bufLen = u8.length - off;
+    }
+  }
+  /**
+   * 压缩一个 64 字节块。
+   *
+   * ⚠️ **这里的 w 是复用的，不是每块新分配一个。** 别"顺手"改回
+   *    \`const w = new Uint32Array(64)\` —— 那样每 64 字节就要分配一次：
+   *    1 MiB 数据 16384 次，2 GiB 文件 3355 万次。
+   *
+   *    实测（\`_lab/bench-sha256-variants.mjs\`，64 MiB，Node 24）：
+   *      每块新建 w      92 MiB/s     ← 1 GbE（118 MB/s）都跟不上
+   *      复用 w         208 MiB/s     ← 单这一处就是 2.26×
+   *      复用 + 局部化   252 MiB/s     ← 下面这些局部变量再加 21%
+   *
+   *    为什么这件事很要紧：浏览器里 **WebCrypto 的 digest 不能增量喂**，
+   *    所以"边收边算整文件摘要"只能用这份纯 JS 实现。而它就是接收速度的天花板 ——
+   *    网卡再快、并发再高，哈希算不过来都白搭。逐块校验那条路走的是原生
+   *    \`crypto.subtle.digest\`（2300+ MiB/s），所以瓶颈只在这一处。
+   */
+  _block(d, off) {
+    const w = this.w;
+    const H = this.H;
+    const K = K256;
+    for (let i = 0; i < 16; i++) {
+      const j = off + i * 4;
+      w[i] = (d[j] << 24) | (d[j + 1] << 16) | (d[j + 2] << 8) | d[j + 3];
+    }
+    for (let i = 16; i < 64; i++) {
+      const x = w[i - 15], y = w[i - 2];
+      const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+      const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+      // 存进 Uint32Array 时自动按 32 位截断，这里不用再 >>> 0
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    let a = H[0], b = H[1], c = H[2], dd = H[3];
+    let e = H[4], f = H[5], g = H[6], h = H[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (dd + t1) >>> 0;
+      dd = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0;
+    H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + dd) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0;
+    H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+  digest() {
+    const bits = this.total * 8;
+    const pad = new Uint8Array(this.bufLen < 56 ? 64 : 128);
+    pad.set(this.buf.subarray(0, this.bufLen));
+    pad[this.bufLen] = 0x80;
+    const dv = new DataView(pad.buffer);
+    dv.setUint32(pad.length - 8, Math.floor(bits / 0x100000000));
+    dv.setUint32(pad.length - 4, bits >>> 0);
+    const saveH = this.H.slice(), saveLen = this.bufLen;
+    for (let o = 0; o < pad.length; o += 64) this._block(pad, o);
+    // 每个文件只走一次，用什么写法都无所谓 —— 不做微优化，可读性优先
+    let out = '';
+    for (let i = 0; i < 8; i++) out += (this.H[i] >>> 0).toString(16).padStart(8, '0');
+    this.H = saveH; this.bufLen = saveLen;     // 允许重复取摘要
+    return out;
+  }
+}
+
+/**
+ * 一次性的 SHA-256，走**原生** WebCrypto。
+ *
+ * ⚠️ 它不能增量喂（\`crypto.subtle.digest\` 只接受完整数据），
+ *    所以只用于**逐块校验**（一块 1 MiB，正好一次）。
+ *    整文件摘要必须用上面那份纯 JS 的增量实现 —— 那也正是接收速度的天花板所在。
+ */
+async function sha256hex(u8) {
+  const d = await crypto.subtle.digest('SHA-256', u8);
+  let out = '';
+  const bytes = new Uint8Array(d);
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+  return out;
+}
+
+// ── 分享（Web Share API）─────────────────────────────────────
+//
+// ── 为什么只在"文件内容还在内存里"时提供 ──────────────────────
+//
+// 用 Web Share API 分享文件需要一个 \`File\` 对象，也就是要拿到**全部字节**。
+// 而这个程序的核心承诺之一是"大文件不爆内存"：走流式写盘那条路径时
+// （Chromium + 用户选了目录），字节写完就放手了，没有留在内存里。
+//
+// 要为了"分享"把整份文件再读回来吗？不行 —— 那等于：
+//   · 40 GB 的文件要占 40 GB 内存（直接崩）
+//   · 而且和"边收边写盘"的设计直接冲突
+//
+// 所以规则很简单：**内容在内存里就提供分享，不在就不提供**，并且说明原因。
+// 手机上恰好总是走内存路径（Safari/Firefox 没有流式写盘），
+// 所以"分享到相册/微信"这个最需要它的场景，可用性最高。
+//
+// 桌面 Chromium 上文件已经落盘了 —— 那时候用户要的是文件本身，不是分享面板。
+async function shareFile(f, btn) {
+  const name = (f.rel.split('/').pop() || f.rel);
+  const old = btn.textContent;
+  try {
+    const file = new File([f._blob], name, { type: f._blob.type || 'application/octet-stream' });
+    // canShare 要按**具体文件**问一次：有些平台支持分享但不支持分享文件，
+    // 还有些对类型/大小有限制。不问就调 share() 会直接抛错。
+    if (!navigator.canShare({ files: [file] })) {
+      alert(t('recv.done.shareUnsupported', { name }));
+      return;
+    }
+    await navigator.share({ files: [file], title: name });
+    // 分享成功与否由系统面板决定，这里不改按钮文字 ——
+    // 用户取消也会走到这里，把按钮改成"已分享"是错的
+  } catch (e) {
+    // AbortError = 用户自己取消了，这是正常操作，不该弹错误
+    if (e && e.name === 'AbortError') return;
+    alert(t('recv.done.shareFailed', { msg: (e && e.message) || '' }));
+  } finally {
+    btn.textContent = old;
+  }
+}
+
+// ── 落盘 ────────────────────────────────────────────────────
+
+// 路径规则来自页面里内联的 window.FlickerPaths（由 gen/inline-path-rules.mjs
+// 从 src/path-safety.js **原样**内联）。这是**唯一的一份实现** ——
+// 从前这里只有一行 \`replace(/[<>:"|?*\\x00-\\x1f]/g, '_')\`，而 Node 那边有 12 条规则；
+// 两边不一致的后果不是"少一层防护"，而是**静默丢文件**（见 validatePaths）。
+const P = window.FlickerPaths;
+
+function isWindowsClient() {
+  try {
+    const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+    return /win/i.test(p);
+  } catch (e) { return false; }
+}
+
+/**
+ * 把清单里的每条路径过一遍规则，并检查"会不会撞成同一个文件"。
+ * **在开始传输之前**调用。
+ *
+ * ⚠️ 为什么必须在开传前查，而不是等写盘时才发现：
+ *    两条不同的清单条目可能在**本机**落成同一个文件 ——
+ *    大小写只差（\`A.txt\` / \`a.txt\`）、Unicode 规范化只差（\`café\` 的 NFC/NFD）、
+ *    或者 Windows 上非法字符被改写后撞车（\`a:b.txt\` 与 \`a_b.txt\` 都变成 \`a_b.txt\`）。
+ *    写盘时才发现，结果是**后写的静默覆盖先写的**：用户看到"传输完成"，
+ *    却少了一个文件，没有任何提示。传了几十 GB 才发现更糟。
+ *
+ * @param {object} wire 已解密的清单
+ * @returns {string[]} 净化后的相对路径，顺序与 wire.files 一致
+ * @throws {Error} 路径违反规则，或两条路径会撞在一起
+ */
+function validatePaths(wire) {
+  const win = isWindowsClient();
+  const out = [];
+  for (const f of wire.files) {
+    try {
+      out.push(P.checkRelPath(f.rel, { windows: win, strict: true }));
+    } catch (e) {
+      const ruleId = (e && e.rule) || '?';
+      // ⚠️ 参数要随错误一起带出去：\`fail()\` 是从**文案表**取消息的，
+      //    它只认 err.params。把参数拼进 err.message 的话，界面上一片空白
+      //    （消息来自表里那条带 {name} 的模板），而且这是个只在出错时才露面的 bug。
+      throw Object.assign(new Error('unsafe path: ' + f.rel), {
+        code: 'E_PATH_UNSAFE', fatal: true,
+        params: { name: f.rel, rule: ruleId + ' ' + (P.PATH_RULES[ruleId] || '') },
+      });
+    }
+  }
+  const conflict = P.findPathConflict(out);
+  if (conflict) {
+    throw Object.assign(new Error('path conflict: ' + conflict.paths.join(' / ')), {
+      code: 'E_MANIFEST_DUPLICATE_PATH', fatal: true,
+      params: { a: conflict.paths[0], b: conflict.paths[1] },
+    });
+  }
+  return out;
+}
+
+async function openSink(file, dirHandle, fileCount, safeRel) {
+  const safe = safeRel || P.checkRelPath(file.rel, { windows: isWindowsClient() });
+  const name = safe.split('/').pop();
+
+  // 路径 A：用户已选目录 → 流式写盘（大文件友好）
+  if (dirHandle) {
+    try {
+      const parts = safe.split('/').slice(0, -1);
+      let dir = dirHandle;
+      for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true });
+      const fh = await dir.getFileHandle(name, { create: true });
+      const w = await fh.createWritable();
+      return { sink: { write: (u8) => w.write(u8) }, close: () => w.close(), streaming: true };
+    } catch { /* 落到路径 B */ }
+  }
+
+  // 路径 B：单个文件保存对话框
+  if (CAN_STREAM && fileCount === 1) {
+    try {
+      const fh = await window.showSaveFilePicker({ suggestedName: name });
+      const w = await fh.createWritable();
+      return { sink: { write: (u8) => w.write(u8) }, close: () => w.close(), streaming: true };
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw Object.assign(new Error(t('recv.err.CANCELLED.t')), { code: 'CANCELLED' });
+    }
+  }
+
+  // 路径 C：内存累积 + 结束时触发下载（Firefox / Safari 走这里）
+  //
+  // ⚠️ 这条路径有一个额外好处：**文件内容就在内存里**。
+  //    所以 Web Share API 能用它 —— 分享需要 File 对象，而流式写盘
+  //    那条路径（A/B）写完就放手了，除非把整份文件再读回来。
+  //    手机上几乎必然走这条路径，所以"分享"在手机上可用性最高。
+  const parts = [];
+  return {
+    // streaming: false —— 这条路径**保留**每一块的视图（最后拼成 Blob），
+    // 所以整文件摘要那边不许零拷贝转移我们的缓冲（见 createFileHasher.update）
+    streaming: false,
+    sink: { write: (u8) => { parts.push(u8); } },
+    close: async () => {
+      const blob = new Blob(parts, { type: 'application/octet-stream' });
+      parts.length = 0;
+      // 留给完成屏的"分享"用（只在内存路径上有）
+      file._blob = blob;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    },
+  };
+}
+
+// ── 收尾 ────────────────────────────────────────────────────
+function finished(wasCancelled, wire, secs) {
+  if (wasCancelled) {
+    show('v-err');
+    $('err-title').textContent = t('recv.cancel.title');
+    $('err-msg').innerHTML = wroteSomething
+      ? t('recv.cancel.keptPart')
+      : t('recv.cancel.nothing');
+    $('btnRetry').classList.remove('hide');
+    return;
+  }
+  show('v-done');
+  // 页面插件：全部收完（这里最适合放"收完之后想做的事"：通知、记账、再加个按钮）
+  window.FlickerPage?.emit('recv/complete', Object.freeze({
+    fileCount: wire.files.length, totalBytes: wire.totalBytes, seconds: secs ?? null,
+  }));
+  window.FlickerPage?.mountActions?.();
+  const avg = secs > 0 ? wire.totalBytes / secs : 0;
+  $('done-sum').innerHTML = t('recv.done.detail', {
+    n: wire.files.length, size: bytes(wire.totalBytes), time: dur(secs), rate: bytes(avg) });
+
+  const box = $('done-files');
+  box.innerHTML = '';
+  // 分享按钮只在**浏览器支持、且文件内容还在内存里**时才显示 ——
+  // 见 shareFile() 的说明。这里先问一次能力，免得给每个文件都白建一个按钮。
+  const canShare = typeof navigator.canShare === 'function';
+  for (const f of wire.files) {
+    const d = document.createElement('div'); d.className = 'file';
+    const n = document.createElement('div'); n.className = 'file-ic'; n.textContent = ic(f.rel);
+    const m = document.createElement('div'); m.className = 'file-meta';
+    const a = document.createElement('div'); a.className = 'file-name'; a.textContent = f.rel;
+    const b = document.createElement('div'); b.className = 'file-size';
+    b.style.color = f._ok ? 'var(--ok)' : 'var(--text-faint)';
+    b.textContent = f._ok ? t('recv.done.verified') : t('recv.done.saved');
+    m.append(a, b); d.append(n, m);
+
+    // 「分享 / 存到相册」—— 手机上这一步才是用户真正想要的：
+    // 存进相册、发给微信、存进文件 App，都走系统分享面板。
+    if (canShare && f._blob) {
+      const btn = document.createElement('button');
+      btn.className = 'mini share';
+      btn.type = 'button';
+      btn.textContent = t('recv.done.share');
+      btn.addEventListener('click', () => shareFile(f, btn));
+      d.append(btn);
+    }
+    box.append(d);
+  }
+
+  // 有文件但一个都没法分享时，**说明原因** —— 否则用户以为程序坏了
+  if (canShare && wire.files.length > 0 && !wire.files.some((f) => f._blob)) {
+    const why = document.createElement('div');
+    why.className = 'hint';
+    why.setAttribute('data-i18n', 'recv.done.shareUnavailable');
+    why.textContent = t('recv.done.shareUnavailable');
+    box.append(why);
+  }
+
+  $('done-destroyed').innerHTML =
+    '<span style="color:var(--text-dim)">' + t('recv.done.destroyList') + '</span>\\n' +
+    '<span class="ck">✓</span> ' + t('recv.done.ck1') + '\\n' +
+    '<span class="ck">✓</span> ' + t('recv.done.ck2') + '\\n' +
+    '<span class="ck">✓</span> ' + t('recv.done.ck3');
+
+  // 主动通知服务端可以销毁了
+  try { navigator.sendBeacon && navigator.sendBeacon('/api/done?sid=' + encodeURIComponent(S.sid)); } catch {}
+}
+
+function fail(err) {
+  const code = err && err.code;
+  show('v-err');
+  // 文案全部走表。**不再在代码里写中文** —— 否则这张表里的每一句
+  // 都只会在中文界面里正确，切到英文就露馅，而且很难发现。
+  const KNOWN = ['BAD_PASSWORD', 'TOO_MANY_FAILURES', 'TOKEN_USED', 'TOKEN_INVALID',
+    'DESTROYED', 'DECRYPT', 'CHUNK_HASH', 'HASH', 'CANCELLED', 'PEER_AUTH',
+    'CHUNK', 'LENGTH', 'RELAY_BAD_MANIFEST', 'RELAY_BAD_CHUNK', 'RELAY_TIMEOUT',
+    'RELAY_GONE', 'NOT_SUPPORTED',
+    // 路径问题（PROTOCOL.md §6.2）。用协议里的错误码，不另起一套名字
+    'E_PATH_UNSAFE', 'E_MANIFEST_DUPLICATE_PATH',
+    // 用户拒绝了写入权限，而文件太大不能退到内存模式（receive() 里抛的）
+    'NO_WRITE_PERMISSION'];
+  const key = KNOWN.includes(code) ? code : 'UNKNOWN';
+  const title = t('recv.err.' + key + '.t');
+  // UNKNOWN 用原始错误文字（可能是网络层给的英文），其余用表里的说明。
+  // ⚠️ 表里的说明带 \`{name}\` \`{a}\` 这类占位符，必须把 err.params 传进去 ——
+  //    忘了传不会报错，只会显示成一句带花括号的话。
+  const msg = key === 'UNKNOWN'
+    ? ((err && err.message) || t('recv.err.UNKNOWN.m'))
+    : t('recv.err.' + key + '.m', (err && err.params) || {});
+  $('err-title').textContent = title;
+  $('err-msg').innerHTML = msg;
+
+  if (code === 'BAD_PASSWORD') {
+    $('btnRetry').classList.remove('hide');
+    $('err-hint').textContent = t('recv.err.hint.badPassword');
+  } else if (code === 'CANCELLED' || code === 'TOKEN_USED' || code === 'TOKEN_INVALID'
+    || code === 'E_PATH_UNSAFE' || code === 'E_MANIFEST_DUPLICATE_PATH') {
+    // ⚠️ 路径问题**不给"重试"按钮**：清单是固定的，重试必然同样失败。
+    //    给一个按了也没用的按钮比不给更糟 —— 用户会反复点，以为是自己操作不对。
+    $('btnRetry').classList.add('hide');
+  } else {
+    $('btnRetry').classList.remove('hide');
+  }
+}
+
+// ── 事件绑定 ────────────────────────────────────────────────
+$('btnStart').addEventListener('click', start);
+$('pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') start(); });
+$('btnRetry').addEventListener('click', () => { $('btnStart').disabled = false; show('v-pw'); $('pw').select(); });
+$('btnCancel').addEventListener('click', () => {
+  cancelled = true;
+  $('go-state').textContent = '正在中止…';
+});
+</script>
+</body>
+</html>
+`
+
+/** 页面内容的指纹，用于自检"部署的页面与源文件是否一致" */
+export const RECEIVER_HTML_DIGEST = 'c3ade5af0461ed1e'

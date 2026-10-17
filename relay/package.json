@@ -1,0 +1,13 @@
+{
+  "name": "flicker-relay",
+  "private": true,
+  "type": "module",
+  "//": "这是中继的部署配置。部署方式见 ../中继部署.md，或直接跑 `node relay/deploy.mjs`。",
+  "scripts": {
+    "deploy": "node deploy.mjs",
+    "dev": "wrangler dev worker.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

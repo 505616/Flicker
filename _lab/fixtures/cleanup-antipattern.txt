@@ -1,0 +1,13 @@
+// 这是**夹具**，不是测试文件（后缀故意用 .txt，免得被任何"发现测试"的机制当成用例）。
+//
+// 它保留的正是那段真实踩过的写法：收尾钩子用 `.catch` 接清理函数。
+// 当清理函数是同步箭头函数（返回 undefined）时，`fn().catch` 会抛 TypeError，
+// 于是后面的清理一个都不跑 —— HTTP 服务不关、子进程攥着管道，
+// node 测试进程永远不退出（表象只是"卡住"）。
+//
+// 用途：test/test-cleanup-check.test.js 把它复制成临时的 bad.test.js，
+// 再跑 gen/check-test-cleanup.mjs，**断言判据真的会失败并指出行号**。
+// 判据必须能被证伪 —— 否则它只是个永远绿的装饰。
+const cleanups = []
+after(async () => { for (const fn of cleanups.reverse()) await fn().catch(() => {}) })
+cleanups.push(() => { try { child.kill() } catch {} })
