@@ -92,6 +92,21 @@ function readBlobs(shas) {
   return out
 }
 
+/**
+ * 取一个提交**存储的**说明正文（含它自己的末尾换行，一个字节都不多）。
+ *
+ * ⚠️ 必须用 `git cat-file commit`，不能用 `git log --pretty=%B`：
+ *    `%B` 会在末尾**多给一个换行**（实测本地对象里正文 1718 字节，`%B` 给 1719）。
+ *    把这个多出来的换行发给 GitHub，两端提交对象就不是同一串字节 ——
+ *    2026-10 首次推送时正是这样白跑了两趟（SHA 对不上，查了才发现是这一个字节）。
+ */
+function commitBody(sha) {
+  const raw = execFileSync('git', ['cat-file', 'commit', sha]).toString('utf8')
+  const at = raw.indexOf('\n\n')
+  if (at < 0) throw new Error(`提交对象里没有空行：${sha}`)
+  return raw.slice(at + 2)
+}
+
 /** 一个提交的文件清单：[{ mode, sha, path }] */
 function treeEntriesOf(commit) {
   return git('ls-tree', '-r', '-z', commit).split('\0').filter(Boolean).map((line) => {
@@ -158,7 +173,7 @@ for (const c of perCommit) {
   if (tree.sha !== localTree) fail(`tree SHA 不一致：本地 ${localTree}，远端 ${tree.sha}`)
 
   const snap = {
-    message: git('log', '-1', '--pretty=%B', c.sha),
+    message: commitBody(c.sha),
     tree: tree.sha,
     parents: [prev],
     author: {
@@ -174,11 +189,8 @@ for (const c of perCommit) {
   }
   const created = await api('POST', `/repos/${REPO}/git/commits`, snap)
 
-  // ⚠️ GitHub 会把提交说明**末尾的换行去掉**（git 本地默认保留一个），于是同样的树、
-  //    同样的作者与时间，SHA 仍然不同。解决办法不是"就让它不同"（那样两端看起来一样、
-  //    其实不是同一个提交，以后 fetch/push 立刻对不上），而是**在本地也造一个逐字节
-  //    相同的提交对象**：用 GitHub 存下来的说明文本 + 本地的原始时间戳跑 `git commit-tree`，
-  //    再核对两边 SHA 是否真的一致。一致才继续。
+  // 核对：GitHub 生成的提交必须与本地**逐字节同一个提交**。不相等就不往下走 ——
+  // 两端"看起来一样、其实不是同一个提交"会在下次 fetch/push 时立刻炸，而且很难解释。
   const rawAuthorDate = git('log', '-1', '--pretty=%ad', '--date=raw', c.sha).trim()
   const rawCommitterDate = git('log', '-1', '--pretty=%cd', '--date=raw', c.sha).trim()
   const localSame = execFileSync('git', ['commit-tree', tree.sha, '-p', prev], {
