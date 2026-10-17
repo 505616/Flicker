@@ -78,13 +78,23 @@ test('npx 的回退路径必须保留（否则某些安装方式就构建不了�
   assert.match(NPX_SRC, /resolveNpxCli/, '要先尝试找到 npx-cli.js')
 })
 
-test('npx-cli.js 的候选覆盖三种已知布局', () => {
-  const list = npxCliCandidates('/opt/node/bin/node', {})
-  assert.ok(list.some((p) => p.includes(path.join('lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'))),
-    'Unix 官方安装包的布局：<prefix>/lib/node_modules/npm/bin/npx-cli.js')
-  const win = npxCliCandidates('C:\\Program Files\\nodejs\\node.exe', {})
-  assert.ok(win.some((p) => p.endsWith(path.join('nodejs', 'node_modules', 'npm', 'bin', 'npx-cli.js'))),
-    'Windows 官方安装包的布局：<nodejs>\\node_modules\\npm\\bin\\npx-cli.js')
+test('npx-cli.js 的候选覆盖已知布局（按**宿主**平台验，path 用的是宿主语义）', () => {
+  // ⚠️ 必须按平台分开断言：`gen/npx.mjs` 用的是 `node:path`（宿主语义），
+  //    在 Linux 上给它一个 `C:\...` 路径，`path.dirname` 会返回 `.`，候选自然对不上 ——
+  //    2026-10 的 Linux CI 第一次跑就是红在这条"用 Windows 路径在 Linux 上验"上。
+  if (process.platform === 'win32') {
+    const win = npxCliCandidates('C:\\Program Files\\nodejs\\node.exe', {})
+    assert.ok(win.some((p) => p.endsWith(path.join('nodejs', 'node_modules', 'npm', 'bin', 'npx-cli.js'))),
+      'Windows 官方安装包的布局：<nodejs>\\node_modules\\npm\\bin\\npx-cli.js')
+    assert.equal(win.length, 3, '没有 npm_execpath 时应当有 3 个候选（同级 / lib / share）')
+  } else {
+    const list = npxCliCandidates('/opt/node/bin/node', {})
+    assert.ok(list.some((p) => p.includes(path.join('lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'))),
+      'Unix 官方安装包的布局：<prefix>/lib/node_modules/npm/bin/npx-cli.js')
+    assert.ok(list.some((p) => p.includes(path.join('share', 'node_modules', 'npm', 'bin', 'npx-cli.js'))),
+      '某些发行版把 npm 放在 share 下：<prefix>/share/node_modules/npm/bin/npx-cli.js')
+    assert.equal(list.length, 3, '没有 npm_execpath 时应当有 3 个候选（同级 / lib / share）')
+  }
   const viaNpm = npxCliCandidates('/usr/bin/node', { npm_execpath: '/usr/lib/node_modules/npm/bin/npm-cli.js' })
   assert.equal(viaNpm[0], path.join('/usr/lib/node_modules/npm/bin', 'npx-cli.js'),
     '通过 npm 脚本启动时，npx-cli.js 就在 npm-cli.js 旁边（最可靠的线索，排在第一个）')

@@ -366,7 +366,9 @@ test('插件文件的名字要过与接收端同一套路径规则（带分隔�
   const cases = [
     ['../escape.txt', /不能带路径分隔符/],
     ['sub/dir.txt', /不能带路径分隔符/],
-    ['CON', /CON|保留/],
+    // `CON` 是 **Windows 的**保留设备名（`src/path-safety.js` 的 R8 按平台生效）——
+    // 在 Linux / macOS 上它是合法文件名，插件贡献它应当被接受。（Linux CI 抓到的）
+    ...(process.platform === 'win32' ? [['CON', /CON|保留/]] : []),
     ['', /缺少 name/],
   ]
   for (const [name, want] of cases) {

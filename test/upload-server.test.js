@@ -241,11 +241,15 @@ test('⭐ 反向验证：整文件摘要对不上 → **不定稿**，半成品�
 // ── ③ 反向：路径安全 ──────────────────────────────────────
 
 test('⭐ 反向验证：清单里的文件名不安全 → **中止整个会话**，且磁盘上什么都没写', async () => {
-  for (const [label, rel] of [
+  // ⚠️ `CON` 只在 **Windows 上**是不安全的名字（`src/path-safety.js` 的 R8 按平台生效）。
+  //    2026-10 的 Linux CI 第一次跑就红了：断言"CON 必须被拒"，而 Linux 上它是完全合法的
+  //    文件名，服务端接受它才是**正确**行为。所以这条用例按平台取输入表。
+  const cases = [
     ['上跳目录', '../evil.txt'],
     ['带分隔符', 'sub/dir.txt'],
-    ['Windows 保留名', 'CON'],
-  ]) {
+  ]
+  if (process.platform === 'win32') cases.push(['Windows 保留名', 'CON'])
+  for (const [label, rel] of cases) {
     const { dir, base, token } = await boot()
     const files = makeFiles({ 'ok.txt': Buffer.from('hi'), [rel]: Buffer.from('x') })
     // 手工构造清单：`rel` 保持原样（不让 makeFiles 之外的东西介入）

@@ -932,17 +932,26 @@ function openDefault(url) {
  *    （测试跑完删掉临时目录、而窗口还开着时就是这样）。
  *    所以：目录不在就什么都不做，把原因**返回给调用方**，由它决定怎么告诉用户。
  */
-function openFolder(dir) {
+/**
+ * 打开保存目录。
+ *
+ * 导出**只为测试**：这条逻辑有两个必须成立的顺序约束（自动化先判、目录不在就不 spawn），
+ * 而集成测试里 GUI 子进程的环境是固定的（`FLICKER_NO_OPEN=1`），没法同时验两条分支。
+ */
+export function openFolder(dir) {
   if (!dir) return { ok: false, dir, error: '没有保存目录' }
+  // ⚠️ 自动化场景要**排在"目录在不在"前面**（2026-10 Linux CI 抓出来的）：
+  //    自动化时根本不该去碰这个目录，返回的原因也必须是"自动化场景跳过"。
+  //    若先查存在性，在没有 ~/Downloads 的环境（CI 的 Linux 就是）会报
+  //    "保存目录已经不在了" —— 那是个**看起来像 bug** 的误导性原因。
+  if (process.env.FLICKER_NO_OPEN === '1') {
+    return { ok: false, dir, error: 'FLICKER_NO_OPEN=1：跳过打开文件夹（自动化场景）' }
+  }
   if (!existsSync(dir)) {
     return { ok: false, dir, error: `保存目录已经不在了：${dir}` }
   }
   const cmd = process.platform === 'win32' ? 'explorer'
     : process.platform === 'darwin' ? 'open' : 'xdg-open'
-  // 自动化场景下"打开文件夹"没有意义，而且会在别人的桌面上弹出窗口
-  if (process.env.FLICKER_NO_OPEN === '1') {
-    return { ok: false, dir, error: 'FLICKER_NO_OPEN=1：跳过打开文件夹（自动化场景）' }
-  }
   try {
     spawn(cmd, [dir], { detached: true, stdio: 'ignore' }).unref()
     return { ok: true, dir }

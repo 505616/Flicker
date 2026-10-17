@@ -230,32 +230,62 @@ test('图形界面：重名时把问题摆到界面上，按用户的选择处�
   assert.deepEqual(names.filter((n) => n !== 'a.txt'), [], '跳过时不该写出任何新文件')
 })
 
-test('⭐ 自动化场景**绝不弹资源管理器**：目录不在时不弹、FLICKER_NO_OPEN 时不弹', { timeout: 90000 }, async () => {
+test('⭐ 自动化场景**绝不弹资源管理器**：先判自动化、目录不在也不 spawn', { timeout: 90000 },
+  async () => {
   // 这条是用户在测试跑到一半时被弹窗逼出来的：
   //   接收模式传完会自动打开保存目录 → 测试的临时目录随后被删 → Windows 弹
   //   "位置不可用 / 该位置可能已移动或删除"。那个框弹在**用户**桌面上。
-  //   所以两件事都要成立：① 自动化时压根不弹；② 目录不在时也不弹（返回原因）。
+  //   所以两件事都要成立：① 自动化时压根不碰目录；② 目录不在时也不 spawn。
   const { dir, inbox } = await workdir('gui-recv-noopen')
   const { gui, api } = await bootGui()
 
-  // ① 目录存在，但这是自动化场景（FLICKER_NO_OPEN=1）→ 不弹，并如实说明原因
+  // ① 起一个接收会话，把"保存目录"固定成这个临时目录（不依赖 ~/Downloads 是否存在 ——
+  //    CI 的 Linux 上它不存在，2026-10 那条第一次跑就因此红了）
+  const started = await api('recv/start', { dir: inbox })
+  assert.equal(started.status, 200, `起接收服务失败：${started.text}`)
+
+  // ② 自动化场景（FLICKER_NO_OPEN=1）→ 不弹，且原因必须**说清是自动化跳过**
   const blocked = await api('recv/open', {})
   assert.equal(blocked.status, 200)
   assert.equal(blocked.json.ok, false, '自动化场景不该真的去打开文件夹')
-  assert.match(String(blocked.json.error), /FLICKER_NO_OPEN/, '要说清是自动化场景跳过，而不是"打不开"')
+  assert.match(String(blocked.json.error), /FLICKER_NO_OPEN/,
+    '要说清是自动化场景跳过，而不是"打不开"')
 
-  // ② 目录被删掉之后（真机上就是"用户手工删了保存目录"）→ 不弹，返回"已经不在了"
+  // ③ 目录被删掉之后（真机上就是"用户手工删了保存目录"）→ 仍然不弹
   await rm(inbox, { recursive: true, force: true })
   const gone = await api('recv/open', {})
-  assert.equal(gone.json.ok, false)
-  assert.match(String(gone.json.error), /不在了|FLICKER_NO_OPEN/,
-    '目录不在时要如实说明，而不是让 explorer 去弹系统错误框')
+  assert.equal(gone.json.ok, false, '目录都没了，绝不能去 spawn explorer')
 
-  // ③ 整个运行过程中日志里不能出现"已打开保存文件夹"
-  //    （那是真的 spawn 了 explorer 才会打的字）
+  // ④ 整个运行过程中日志里不能出现"已打开保存文件夹"（那是真的 spawn 了才会打的字）
   const out = gui.getOut()
-  assert.ok(!out.includes('已打开保存文件夹'), `不该打开文件夹，但日志里出现了：\n${out.slice(-500)}`)
+  assert.ok(!out.includes('已打开保存文件夹'), `不该打开文件夹，但日志里出现了：
+${out.slice(-500)}`)
   assert.ok(dir, '（占位：保持临时目录的清理登记）')
+})
+
+test('`openFolder`：自动化判定排在"目录在不在"前面；目录不在时不 spawn', async () => {
+  // ⚠️ 这两条顺序约束在集成测试里验不全（GUI 子进程的环境是固定的），所以直接单测它。
+  //    第二条尤其重要：目录不存在时**先返回原因**，而不是让 explorer/xdg-open 去弹系统错误框。
+  const { openFolder } = await import('../src/gui.js')
+  const tmp = await mkdtemp(path.join(tmpdir(), 'flicker-openfolder-'))
+  cleanups.push(() => rm(tmp, { recursive: true, force: true }))
+  const readEnv = process.env.FLICKER_NO_OPEN
+  try {
+    // 自动化：即使目录不存在，原因也必须是"自动化场景"，而不是"不在了"
+    process.env.FLICKER_NO_OPEN = '1'
+    const auto = openFolder(path.join(tmp, 'does-not-exist'))
+    assert.equal(auto.ok, false)
+    assert.match(auto.error, /FLICKER_NO_OPEN/, '自动化判定要排在存在性检查前面')
+
+    // 非自动化 + 目录不存在：返回"不在了"，且**绝不 spawn**（spawn 会弹窗）
+    delete process.env.FLICKER_NO_OPEN
+    const gone = openFolder(path.join(tmp, 'does-not-exist'))
+    assert.equal(gone.ok, false)
+    assert.match(gone.error, /不在了/)
+  } finally {
+    if (readEnv === undefined) delete process.env.FLICKER_NO_OPEN
+    else process.env.FLICKER_NO_OPEN = readEnv
+  }
 })
 
 test('图形界面：一次接收结束后可以「再来一次」（会话是一次性的）', { timeout: 90000 }, async () => {
