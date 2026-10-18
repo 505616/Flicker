@@ -15,8 +15,15 @@
  *   · `.sh` / `.command` → 必须 **LF、无 BOM**（Unix shell 的要求；
  *     LF 的 .sh 在 Windows 上 Git 检出时若被转成 CRLF 会报
  *     `bad interpreter: /bin/sh^M`）
- *   · `.js` / `.mjs` / `.json` / `.md` / `.html` → 不作限制（都能处理），
- *     但**不许有 BOM**（BOM 会破坏 JSON.parse 与不少工具）
+ *   · `.js` / `.mjs` / `.json` / `.md` / `.html` / `.yml` / `.txt` → 必须 **LF、无 BOM**
+ *
+ *     为什么这些也要限死 LF：**内容指纹**。`gen/inline-i18n.mjs`、`gen/gen-relay-page.mjs`、
+ *     `gen/asset-digests.mjs`、赠品源码包的摘要，算的都是文件的**字节**。仓库里
+ *     `.gitattributes` 写着 `* text=auto eol=lf`，提交进去的是 LF；而 2026-10 有个
+ *     脚本在 Windows 上用"文本模式"回写了几份文件（`\n` → `\r\n`），于是本地算出的
+ *     指纹与**提交后的内容**对不上 —— 本地 `npm run check` 全绿，CI 上却是
+ *     "i18n 内联段与当前文案表不一致"，三个平台一起红，而错误信息完全指不到行尾。
+ *     从那之后这条约定就是硬约束：文本文件一律 LF。
  *   · 所有文本文件 → 必须是**合法 UTF-8**（见下面 ③ 的说明）
  *
  * 用法：node gen/check-line-endings.mjs
@@ -39,16 +46,23 @@ const RULES = {
   '.bat': 'CRLF',
   '.sh': 'LF',
   '.command': 'LF',
-  '.js': null, '.mjs': null, '.cjs': null,
-  '.json': null, '.md': null, '.html': null, '.yml': null, '.txt': null,
+  // 其余文本一律 LF（见上面"内容指纹"那段）
+  '.js': 'LF', '.mjs': 'LF', '.cjs': 'LF',
+  '.json': 'LF', '.md': 'LF', '.html': 'LF', '.yml': 'LF', '.txt': 'LF',
 }
 
 /** 检查 BOM 的扩展名（BOM 对这些格式都有害） */
 const NO_BOM = new Set(Object.keys(RULES))
 
+/**
+ * 生成出来、不进仓库的目录：它们的行尾由生成它们的那条命令决定（控制台输出、
+ * 二维码文本…），没有"约定"可守。`_lab/out/` 就是这种。
+ */
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'out'])
+
 function collect(dir, out = []) {
   for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name === '.git' || name === 'dist') continue
+    if (SKIP_DIRS.has(name)) continue
     const full = path.join(dir, name)
     if (statSync(full).isDirectory()) collect(full, out)
     else out.push(full)
@@ -87,8 +101,13 @@ for (const f of files) {
     bad++
   }
   if (want === 'LF' && crlf > 0) {
-    console.error(`✗ ${rel}：是 ${ext} 文件，但有 ${crlf} 个 CRLF 行尾（应为全 LF）。\n` +
-      '    Unix 下会报 `bad interpreter: /bin/sh^M`。')
+    const why = (ext === '.sh' || ext === '.command')
+      ? '    Unix 下会报 `bad interpreter: /bin/sh^M`。'
+      : '    仓库里 .gitattributes 是 `eol=lf`，提交进去的是 LF；而内容指纹（i18n 内联段、\n' +
+        '    中继页面、资源摘要、赠品源码包）算的是字节 —— CRLF 会让**本地算的指纹**与\n' +
+        '    提交后的内容对不上：本地全绿、CI 红，而且报错完全指不到行尾。\n' +
+        '    用 Python 的 open(..., "w")（默认文本模式）或某些编辑器在 Windows 上回写就会这样。'
+    console.error(`✗ ${rel}：是 ${ext} 文件，但有 ${crlf} 个 CRLF 行尾（应为全 LF）。\n` + why)
     bad++
   }
 
