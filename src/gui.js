@@ -37,6 +37,7 @@ import { bindSignals, Destroyer } from './destroy.js'
 import { cleanAllLeftovers, cleanTempDirs } from './trust.js'
 import { runSend } from './run.js'
 import { startReceiveService, defaultSaveDir, waitForReceive } from './recv.js'
+import { matchFingerprint, parseRecvLink, probePeer, pullFromLink } from './pull.js'
 import { dedupePath } from './manifest.js'
 import { compareKeyOf } from './path-safety.js'
 import { BROWSER_QR_SOURCE } from './tty.js'
@@ -185,6 +186,24 @@ export async function runGui(opts = {}) {
     },
     recvLive: null,         // startReceiveService 给的句柄（停止按钮靠它）
     recvRun: null,          // 后台等待的 promise
+    // ── 用闪传自己接收（`flicker recv <链接>` 的界面版）────────────
+    // 这是**第三个方向**：不是"我要发"，也不是"等手机发过来"，而是
+    // "我到对方的链接里把文件取回来"。它由 **Node** 去取（不是页面 fetch）——
+    // 页面在 127.0.0.1、对方是局域网 IP + 自签证书，浏览器的跨源与证书都会拦下来。
+    pull: {
+      phase: 'off',         // off | ready | transfer | done | stopped | error
+      link: '', dir: null,
+      fingerprint: null,    // 探测到的证书指纹（前 8 位，大写）
+      plan: null,           // {files, totalBytes}
+      progress: null,       // {bytes, totalBytes, files, totalFiles, current}
+      files: [],            // 已定稿的文件名（给结果面板）
+      failed: [],
+      report: null,
+      error: null,
+      elapsed: null,
+    },
+    pullController: null,   // AbortController：停止按钮靠它
+    pullRun: null,          // 后台跑的 promise
   }
 
   // ── 目录浏览（"选择文件/文件夹"背后的实现）──────────────────
@@ -390,6 +409,10 @@ export async function runGui(opts = {}) {
           case '/api/recv/again': json(await resetRecv()); return
           case '/api/recv/collision': json(answerCollision(body.choice)); return
           case '/api/recv/open': json(await openRecvDir()); return
+          case '/api/pull/probe': json(await probePullLink(body.link)); return
+          case '/api/pull/start': json(await startPull(body)); return
+          case '/api/pull/stop': json(await stopPull()); return
+          case '/api/pull/open': json(await openPullDir()); return
           default: json({ error: '没有这个接口' }, 404); return
         }
       }
@@ -494,6 +517,9 @@ export async function runGui(opts = {}) {
       // 界面上一块空白，排查起来要来回对两边的字段名。
       recv: S.recv.phase === 'off' ? null : { ...S.recv },
       recvDefaultDir: defaultSaveDir(),
+      // 用闪传自己接收：整块给出去（字段少，不裁剪 —— 少一个字段的表现是界面一块空白）
+      pull: S.pull.phase === 'off' ? null : { ...S.pull },
+      pullDefaultDir: defaultSaveDir(),
       // 插件：加载了什么**必须看得见**（项目规矩）。页面可以据此显示
       // "本次界面带着 2 个插件" —— 没有插件时是空数组，页面不用做条件判断。
       plugins: plugins?.list ?? [],
@@ -880,6 +906,162 @@ export async function runGui(opts = {}) {
    */
   async function openRecvDir() {
     const dir = S.recv.dir ?? defaultSaveDir()
+    const r = openFolder(dir)
+    if (!r.ok) log(`  ! 没有打开保存文件夹：${r.error}`)
+    return r
+  }
+
+  // ── 用闪传自己接收（界面版 `flicker recv <链接>`）──────────────
+  //
+  // 为什么由 **Node** 去取，而不是让页面去 fetch：
+  //   · 页面在 `http://127.0.0.1:<端口>`，对方的接口在 `https://192.168.x.x:<端口>` ——
+  //     跨源，而 `src/server.js` 一个 CORS 头都不发；
+  //   · 对方用的是**自签证书**，CA 只装在他那台机器上，浏览器不会为 XHR 给"继续前往"。
+  //   把取文件这件事交给同一个进程里的 `pullFromLink()`，两个问题一起消失：
+  //   它本来就是 `flicker recv <链接>` 那条命令的实现。证书那一关改成"人核对指纹"。
+
+  /** 只探测：解析链接、连一次、把证书指纹算出来给界面显示（不传任何数据） */
+  async function probePullLink(link) {
+    const parsed = parseRecvLink(link)
+    if (parsed.kind === 'relay') {
+      return { ok: false, error: `中继链接请用浏览器打开：${parsed.reason}`, code: 'RELAY_LINK' }
+    }
+    if (parsed.kind !== 'direct') return { ok: false, error: parsed.reason, code: 'BAD_LINK' }
+    try {
+      const probe = await probePeer({ base: parsed.base })
+      S.pull = {
+        ...S.pull,
+        phase: 'ready',
+        link: String(link),
+        fingerprint: probe.secure ? probe.sha256.slice(0, 8).toUpperCase() : null,
+        // http 链接没有证书可核对：界面上要**明确**说出来，不能让人以为核对过了
+        insecureNoTls: !probe.secure,
+        error: null,
+        report: null,
+        plan: null,
+        progress: null,
+        files: [],
+        failed: [],
+      }
+      S.pullPinned = probe.secure ? probe.sha256 : null      // 完整 SHA-256：钉住用，不给页面
+      log(`  · 探测到对方证书指纹 ${S.pull.fingerprint ?? '（明文 http，无证书）'}`)
+      return { ok: true, fingerprint: S.pull.fingerprint, tls: probe.secure, dir: S.pull.dir }
+    } catch (e) {
+      S.pull = { ...S.pull, phase: 'off', error: { code: e?.code ?? 'PROBE', message: e?.message ?? String(e) } }
+      return { ok: false, error: e?.message ?? String(e), code: e?.code ?? 'PROBE' }
+    }
+  }
+
+  /**
+   * 开始接收。**不 await 传输本身** —— 否则这个 HTTP 请求会挂到传完为止
+   * （发送那边踩过同一个坑：`/api/start` 里 await 了整场传输）。
+   */
+  async function startPull(body = {}) {
+    const link = String(body.link ?? S.pull.link ?? '').trim()
+    const password = String(body.password ?? '')
+    const dir = String(body.dir ?? S.pull.dir ?? defaultSaveDir()).trim() || defaultSaveDir()
+    if (!link) return { ok: false, error: '还没有链接' }
+    if (!password) return { ok: false, error: '还没有填密码' }
+    if (S.pull.phase === 'transfer') return { ok: false, error: '已经在接收了' }
+    if (S.pull.phase !== 'ready') {
+      const p = await probePullLink(link)
+      if (!p.ok) return p
+    }
+
+    // 指纹核对：界面把探测到的指纹显示给用户，用户点了"一致"才继续。
+    // 不勾"已核对"就必须自己把指纹打进来（等价于命令行的 `--fingerprint=`）。
+    // 三种形态，界面上的说法与命令行一一对应：
+    //   · 用户自己把对方屏幕上的指纹打进来（等价 --fingerprint=）
+    //   · 用户点了"我核对过，一致"（界面已经把指纹显示出来了）
+    //   · 用户明确选择"不核对"（等价 --insecure，界面上必须写着没核对）
+    const typed = String(body.typed ?? '').toUpperCase().replace(/[^0-9A-F]/g, '')
+    const insecure = body.insecure === true
+    if (S.pull.fingerprint) {
+      if (typed && !matchFingerprint(S.pullPinned, typed)) {
+        return { ok: false, error: '你输入的指纹与对方证书不一致 —— 可能有人在冒充对方的地址', code: 'FINGERPRINT' }
+      }
+      if (!insecure && !typed && body.confirm !== true) {
+        return { ok: false, error: '请先核对界面上的证书指纹（或明确选择"不核对"）', code: 'NEED_CONFIRM' }
+      }
+    } else if (!insecure) {
+      // 明文 http：没有证书可核对，但也不能悄悄放过
+      return { ok: false, error: '这条链接是明文 http，没有证书可核对；确定要继续就明确选择"不核对"', code: 'NEED_CONFIRM' }
+    }
+    if (insecure) log('  ! 用户选择**不核对**证书指纹（界面上有说明）')
+
+    const controller = new AbortController()
+    S.pullController = controller
+    S.pull = {
+      ...S.pull, phase: 'transfer', link, dir,
+      plan: null,
+      progress: { bytes: 0, totalBytes: 0, files: 0, totalFiles: 0, current: null },
+      files: [], failed: [], report: null, error: null, elapsed: null,
+    }
+    const t0 = Date.now()
+    log(`  ⬇ 开始从对方的链接取文件：${link.replace(/\?k=.*/, '?k=…')} → ${dir}`)
+    S.pullRun = (async () => {
+      try {
+        const r = await pullFromLink({
+          link,
+          password,
+          dir,
+          signal: controller.signal,
+          // 探测阶段拿到的是**完整 SHA-256**（只把前 8 位显示给用户）：
+          // 整场传输都用它钉住证书，中途换一张就立刻失败（见 src/pull.js 的 verifyPeer）
+          pinnedSha256: S.pullPinned,
+          onManifest: (m) => {
+            S.pull.plan = { files: m.files, totalBytes: m.totalBytes }
+            S.pull.progress = { ...S.pull.progress, totalBytes: m.totalBytes, totalFiles: m.files }
+          },
+          onBytes: (n) => {
+            const p = S.pull.progress ?? { bytes: 0, totalBytes: 0, files: 0, totalFiles: 0, current: null }
+            S.pull.progress = { ...p, bytes: p.bytes + n }
+          },
+          onFile: (f) => {
+            if (f.ok) {
+              S.pull.files = [...S.pull.files, { rel: f.finalRel ?? f.rel, bytes: f.bytes }]
+              S.pull.progress = { ...S.pull.progress, files: S.pull.files.length, current: f.finalRel ?? f.rel }
+            } else {
+              S.pull.failed = [...S.pull.failed, { rel: f.rel, reason: f.reason }]
+            }
+          },
+        })
+        S.pull.report = { files: r.files.length, bytes: r.bytes, failed: r.failed.length }
+        S.pull.elapsed = (Date.now() - t0) / 1000
+        S.pull.phase = 'done'
+        log(`  ✓ 收到 ${r.files.length} 个文件，共 ${formatSize(r.bytes)}（全部逐块校验）`)
+        if (r.failed.length) log(`  ! ${r.failed.length} 个文件失败：${r.failed.map((f) => f.rel).join('、')}`)
+      } catch (e) {
+        const cancelled = e?.code === 'CANCELLED' || controller.signal.aborted
+        S.pull.phase = cancelled ? 'stopped' : 'error'
+        S.pull.elapsed = (Date.now() - t0) / 1000
+        if (!cancelled) {
+          S.pull.error = { code: e?.code ?? 'PULL', message: e?.message ?? String(e) }
+          log(`  ✗ 接收失败：${e?.message ?? e}`)
+        } else {
+          log('  · 已按你的要求停止接收（已收下的文件保留）')
+        }
+      } finally {
+        S.pullController = null
+        S.pullRun = null
+      }
+    })()
+    return { ok: true }
+  }
+
+  /** 停止：真的中断（关连接），不是只改状态 */
+  async function stopPull() {
+    if (!S.pullController) {
+      if (S.pull.phase === 'transfer') S.pull.phase = 'stopped'
+      return { ok: true }
+    }
+    log('  · 用户要求停止接收')
+    S.pullController.abort()
+    return { ok: true }
+  }
+
+  async function openPullDir() {
+    const dir = S.pull.dir ?? defaultSaveDir()
     const r = openFolder(dir)
     if (!r.ok) log(`  ! 没有打开保存文件夹：${r.error}`)
     return r

@@ -103,7 +103,7 @@ Give up any one of those four, and something else is probably less trouble.
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
 > Cross-network (relay) is **implemented and verified against a real relay**.
 
-**Tests: 658 cases — 654 pass, 0 fail, 4 skipped.** Each skip says why: three need a working
+**Tests: 662 cases — 658 pass, 0 fail, 4 skipped.** Each skip says why: three need a working
 **git** (they guard *repository metadata* such as "are the launch scripts executable in git?" ——
 they are skipped where git is not on PATH, e.g. this machine's PowerShell, and do run in CI), and one
 needs a symlink (creating one on Windows requires developer mode or admin rights — an environment
@@ -287,7 +287,7 @@ npm run release       # arrange it into a publishable shape → dist/release/
 
 `npm run release` produces `SHA256SUMS` and `RELEASE.md` (download table, usage,
 **known limitations**, checksums) and prints a ready-to-copy `gh release create` command.
-It also pairs every artifact with a **zip** (94.3 MB → 36.0 MB, **62% smaller**): 89.2 MB of the
+It also pairs every artifact with a **zip** (94.4 MB → 36.0 MB, **62% smaller**): 89.2 MB of the
 artifact is the Node runtime and cannot be removed, so what we compress is the *download*, not the size.
 The ZIP writer is our own, zero-dependency one (`gen/zip.mjs`).
 

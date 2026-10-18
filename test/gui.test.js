@@ -122,8 +122,14 @@ test('图形界面：根路径返回站点页，且是自包含的', { timeout: 
   assert.match(html, /我要发文件/)
   assert.match(html, /有人要发给我|开始接收|让对方扫码/, '应有接收或分享区块')
   // 自包含：不能引用任何外部资源
+  //
+  // ⚠️ 扫之前先去掉 `placeholder="…"`：它只是输入框里的**提示文字**（比如
+  //    `https://192.168.x.x:8443/?k=…`，告诉用户该粘什么），浏览器不会去取它。
+  //    第一版没去掉，加了那个例子之后这条用例就红了 —— 红得没道理；
+  //    而"把判据整个改松"又不是想做的事，所以只排除这一处明确不是资源引用的属性。
+  const noPlaceholder = html.replace(/\bplaceholder="[^"]*"/gi, 'placeholder=""')
   for (const re of [/<script[^>]+src=/i, /<link[^>]+href=/i, /https?:\/\/(?!127\.0\.0\.1|localhost)/i]) {
-    assert.ok(!re.test(html), `站点页不应引用外部资源: ${re}`)
+    assert.ok(!re.test(noPlaceholder), `站点页不应引用外部资源: ${re}`)
   }
 })
 

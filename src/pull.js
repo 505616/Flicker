@@ -282,7 +282,7 @@ export function checkManifestPaths(wire) {
  *
  * @returns {Promise<{rel:string, finalRel:string, bytes:number, ok:boolean, reason?:string}>}
  */
-async function pullFile({ client, sid, keys, file, fi, dir, taken, ui, onBytes }) {
+async function pullFile({ client, sid, keys, file, fi, dir, taken, ui, onBytes, signal }) {
   const wanted = file.rel
   const existingKey = compareKeyOf(wanted)
   let finalRel = wanted
@@ -305,6 +305,7 @@ async function pullFile({ client, sid, keys, file, fi, dir, taken, ui, onBytes }
   let bytes = 0
   try {
     for (let ci = 0; ci < file.chunks; ci++) {
+      if (signal?.aborted) throw new PullError('已取消', 'CANCELLED')
       const seq = (Number.isInteger(file.firstChunk) ? file.firstChunk : 0) + ci
       const r = await client(`/api/chunk?seq=${seq}&sid=${encodeURIComponent(sid)}`)
       if (r.status !== 200) {
@@ -370,10 +371,13 @@ async function existsOnDisk(dir, rel) {
  * @param {object} [o.ui] tty 界面（可选）
  * @param {(n:number)=>void} [o.onBytes] 每收下一块回调一次（图形界面/测试用）
  * @param {(info:object)=>void} [o.onFile] 每个文件结束时回调
+ * @param {(info:object)=>void} [o.onManifest] 清单解密后回调一次（界面拿它显示"共 N 个文件"）
+ * @param {AbortSignal} [o.signal] 取消信号（图形界面的「停止」按钮用）
  * @returns {Promise<{ok:boolean, dir:string, files:object[], failed:object[], bytes:number}>}
  */
 export async function pullFromLink(o = {}) {
-  const { link, password, dir: outDir } = o
+  const { link, password, dir: outDir, signal = null } = o
+  const aborted = () => Boolean(signal?.aborted)
   const ui = o.ui ?? null
   if (!link) throw new PullError('没有链接', 'NO_LINK')
   if (!password) throw new PullError('没有密码', 'NO_PASSWORD')
@@ -385,12 +389,21 @@ export async function pullFromLink(o = {}) {
   }
 
   const client = makeClient({ base: parsed.base, pinnedSha256: o.pinnedSha256 ?? null })
+  // 取消时立刻把连接关掉：否则"正在等一块"的请求会一直挂着，「停止」要等好几秒才生效
+  if (signal) signal.addEventListener('abort', () => client.close?.(), { once: true })
+  const ensureLive = () => {
+    if (aborted()) throw new PullError('已取消', 'CANCELLED')
+  }
   await mkdir(outDir, { recursive: true })
 
   const { sid, keys, wire, profile } = await openPullSession({
     client, token: parsed.token, password, ui,
   })
   const files = checkManifestPaths(wire)
+  o.onManifest?.({
+    files: files.length,
+    totalBytes: files.reduce((a, f) => a + Number(f.size || 0), 0),
+  })
   if (profile === 'v1' && ui) {
     ui.warn('对方的程序较旧（握手用的旧格式）：本次传输正常，但"防套件降级"对这次会话不成立')
   }
@@ -401,11 +414,12 @@ export async function pullFromLink(o = {}) {
   let totalBytes = 0
   try {
     for (let fi = 0; fi < files.length; fi++) {
+      ensureLive()
       const file = files[fi]
       ui?.step(`接收中：${file.rel}`)
       try {
         const r = await pullFile({
-          client, sid, keys, file, fi, dir: outDir, taken, ui,
+          client, sid, keys, file, fi, dir: outDir, taken, ui, signal,
           onBytes: (n) => { totalBytes += n; o.onBytes?.(n) },
         })
         ui?.progressDone?.()
