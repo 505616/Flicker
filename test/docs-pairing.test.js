@@ -78,24 +78,12 @@ test('⭐ 新增一份文档时，赠品源码包也必须带上它', async () =
   //    所以清单换成了"遍历整棵树 + 黑名单"（`collectSourceFiles`），
   //    这里也就改成**直接问打包函数要文件清单**（不再解析源码文本，免得再一次漂移）。
   const { installFromDisk } = await import('../src/assets.js')
-  const { buildSourcePack } = await import('../src/gift.js')
   installFromDisk(ROOT)
 
+  const { buildSourcePack, unpackArchive } = await import('../src/gift.js')
   const pack = await buildSourcePack(ROOT)
-  // 从包里读回文件清单（FKZ1 容器的格式见 src/gift.js 顶部注释）
-  const names = []
-  {
-    const buf = pack.bytes
-    const count = buf.readUInt32BE(4)
-    let off = 8
-    for (let i = 0; i < count; i++) {
-      const nameLen = buf.readUInt16BE(off)
-      const dataLen = buf.readUInt32BE(off + 4)
-      off += 8
-      names.push(buf.subarray(off, off + nameLen).toString('utf8'))
-      off += nameLen + dataLen
-    }
-  }
+  // 从包里读回文件清单 —— 用 `src/gift.js` 的**唯一**读实现（别在这里再手写一份解析器）
+  const names = unpackArchive(pack.bytes).map((e) => e.rel)
   const listed = new Set(names)
 
   for (const dir of ['中文文档', 'docs']) {

@@ -88,21 +88,12 @@ function requiredFiles() {
 async function buildPack() {
   const { installFromDisk } = await import('../src/assets.js')
   installFromDisk(ROOT)
-  const { buildSourcePack } = await import('../src/gift.js')
+  const { buildSourcePack, unpackArchive } = await import('../src/gift.js')
   const pack = await buildSourcePack(ROOT)
   const buf = pack.bytes
-  if (buf.subarray(0, 4).toString('ascii') !== 'FKZ1') throw new Error('打出来的不是 FKZ1 容器')
-  const count = buf.readUInt32BE(4)
-  const entries = []
-  let off = 8
-  for (let i = 0; i < count; i++) {
-    const nameLen = buf.readUInt16BE(off)
-    const dataLen = buf.readUInt32BE(off + 4)
-    off += 8
-    const name = buf.subarray(off, off + nameLen).toString('utf8'); off += nameLen
-    const data = buf.subarray(off, off + dataLen); off += dataLen
-    entries.push({ rel: name, data })
-  }
+  // ⚠️ 用 `src/gift.js` 的**唯一**读实现，不在这里再手写一遍：
+  //    同一个容器格式两份解析器，迟早会出现"打包端能读、解包端读不了"这种最难查的漂移。
+  const entries = unpackArchive(buf)
   return { bytes: buf, entries, docCount: pack.docCount }
 }
 

@@ -9,8 +9,11 @@
  *
  * 这个功能是项目唯一的传播机制：每送出去一次，接收方就多一个完整的站点。
  */
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { sanitizeRelPath } from './manifest.js'
+import { compareKeyOf } from './path-safety.js'
 import {
   rootDir, version as pkgVersion, isSingleFile, readAssetBinary,
   tryReadAssetBinary, assetFingerprint,
@@ -284,13 +287,28 @@ function platformTag() {
 //   magic "FKZ1" | 条目数(u32) | [ 路径长度(u16) | 路径 | 模式(u16) | 长度(u32) | 内容 ]...
 // 目的只是"把几个文件装进一个文件里方便传输"，不做压缩（压缩对源码收益很小）。
 //
-// ⚠️ 这里**只写不读**：接收方是浏览器页面，它把 `.fkz` 原样存到磁盘，由使用者自己解开。
-//    注意当前事实：**产品里没有任何东西能打开它**（这是一个已知缺口，最自然的补法在
-//    接收端页面 —— 文件字节本来就在它手里）。
-//    从前这里有一个 `unpackArchive()`，但全仓库零调用、零测试，
-//    留着只会让"谁负责解这个包"看起来已经有答案了（2026-10 删除）。
+// ── 读的那一半（2026-10 补上）──
+// 从前这里**只写不读**，于是"把源码送给对方"这件事只做了一半：对方拿到 `.fkz`
+// 之后，产品里没有任何东西能打开它（`_lab/交接.md` 里这条缺口挂了一整年）。
+// 现在有了 `unpackArchive()`，并由 `flicker unpack <文件>` 接到命令行上：
+// **收到 exe + `.fkz` 的人，用那个 exe 就能把源码解开**，不需要 Node、不需要别的工具。
+//
+// ⚠️ 读的时候是**不信任输入**的：`.fkz` 可能来自别人（甚至是伪造的）。
+//    所以下面每一条都要挡住，并且都要有测试：
+//      · 魔数 / 长度越界 / 条目数字荒唐 → 明确报错，而不是读出半个文件；
+//      · 路径必须过 `sanitizeRelPath`（`../x`、绝对路径、Windows 保留名一律拒绝）；
+//      · 名字必须是**合法 UTF-8**（`toString('utf8')` 会把坏字节换成 U+FFFD，那是静默损坏）；
+//      · 两个条目会落到同一个文件（大小写 / NFC 归一化后相同）→ 拒绝，避免静默覆盖；
+//      · 末尾多余的字节 → 拒绝（正常的包一字节不多，多出来说明被拼过东西）。
 
 const MAGIC = Buffer.from('FKZ1', 'ascii')
+
+/** 解包时的上限：条目数、单条路径长度、总解压体积（防止被一个坏包撑爆磁盘/内存） */
+export const UNPACK_LIMITS = Object.freeze({
+  maxEntries: 100_000,
+  maxNameBytes: 4096,
+  maxTotalBytes: 1024 ** 3,      // 1 GiB —— 源码包实际只有几 MB
+})
 
 function packArchive(files) {
   const parts = [MAGIC]
@@ -304,4 +322,140 @@ function packArchive(files) {
     parts.push(head, nameBuf, f.data)
   }
   return Buffer.concat(parts)
+}
+
+/**
+ * 打包（给测试与工具用）。
+ *
+ * 生产路径走 `packArchive()`（私有的），但判据需要能造"包" ——
+ * 尤其是造**坏包**（坏魔数/截断/路径穿越……）。把它导出而不是在测试里手写字节，
+ * 是为了"格式只有一份定义"：改了 `packArchive()`，这里跟着变。
+ */
+export function packForTest(files) {
+  return packArchive(files)
+}
+
+/** 解包的错误：带 code，调用方据此决定退出码与提示 */
+export class UnpackError extends Error {
+  constructor(message, code) {
+    super(message)
+    this.name = 'UnpackError'
+    this.code = code
+  }
+}
+
+/**
+ * 把一个 `.fkz` 字节流解成条目列表（**不落盘**）。
+ *
+ * @param {Buffer|Uint8Array} bytes
+ * @returns {{rel:string, mode:number, data:Buffer}[]}
+ * @throws {UnpackError}
+ */
+export function unpackArchive(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? [])
+  if (buf.length < 8) throw new UnpackError('这不是一个 .fkz 包（太短了）', 'TOO_SHORT')
+  if (!buf.subarray(0, 4).equals(MAGIC)) {
+    throw new UnpackError('这不是一个 .fkz 包（开头不是 FKZ1）', 'BAD_MAGIC')
+  }
+  const count = buf.readUInt32BE(4)
+  if (count === 0) throw new UnpackError('这个 .fkz 包里没有任何文件', 'EMPTY')
+  if (count > UNPACK_LIMITS.maxEntries) {
+    throw new UnpackError(
+      `条目数不合理：${count}（上限 ${UNPACK_LIMITS.maxEntries}）—— 这个包可能坏了或被伪造`,
+      'TOO_MANY_ENTRIES')
+  }
+
+  const out = []
+  const seen = new Map()          // 比较键 → 原名（用于发现"两个条目落到同一个文件"）
+  let off = 8
+  let total = 0
+  for (let i = 0; i < count; i++) {
+    if (off + 8 > buf.length) {
+      throw new UnpackError(`包里第 ${i + 1} 个条目的头部就超出了文件末尾（已截断？）`, 'TRUNCATED')
+    }
+    const nameLen = buf.readUInt16BE(off)
+    const mode = buf.readUInt16BE(off + 2)
+    const dataLen = buf.readUInt32BE(off + 4)
+    off += 8
+    if (nameLen === 0) throw new UnpackError(`第 ${i + 1} 个条目没有名字`, 'BAD_NAME')
+    if (nameLen > UNPACK_LIMITS.maxNameBytes) {
+      throw new UnpackError(`第 ${i + 1} 个条目的路径太长（${nameLen} 字节）`, 'BAD_NAME')
+    }
+    if (off + nameLen + dataLen > buf.length) {
+      throw new UnpackError(`包里第 ${i + 1} 个条目的内容超出了文件末尾（已截断？）`, 'TRUNCATED')
+    }
+    const nameBuf = buf.subarray(off, off + nameLen)
+    off += nameLen
+    // ⚠️ `toString('utf8')` 会把非法字节悄悄换成 U+FFFD —— 那就成了"文件名被改过但没人知道"。
+    //    这里要求**编码再解码后逐字节相同**，否则直接拒绝。
+    const name = nameBuf.toString('utf8')
+    if (!Buffer.from(name, 'utf8').equals(nameBuf)) {
+      throw new UnpackError(`第 ${i + 1} 个条目的名字不是合法 UTF-8`, 'BAD_NAME')
+    }
+
+    // 路径安全：与接收端 / 插件同一套规则（`../x`、绝对路径、Windows 保留名都过不去）
+    let rel
+    try {
+      rel = sanitizeRelPath(name, { strict: true })
+    } catch (e) {
+      throw new UnpackError(
+        `包里第 ${i + 1} 个条目的路径不安全：${JSON.stringify(name)}（${e?.message ?? e}）`,
+        'UNSAFE_PATH')
+    }
+
+    const key = compareKeyOf(rel)
+    if (seen.has(key)) {
+      throw new UnpackError(
+        `包里有两个条目会落到同一个文件：${seen.get(key)} 与 ${rel} —— ` +
+        '继续解会静默覆盖掉一个，已停止', 'DUPLICATE_PATH')
+    }
+    seen.set(key, rel)
+
+    const data = buf.subarray(off, off + dataLen)
+    off += dataLen
+    total += dataLen
+    if (total > UNPACK_LIMITS.maxTotalBytes) {
+      throw new UnpackError(`解出来的总大小超过上限（${UNPACK_LIMITS.maxTotalBytes} 字节）`, 'TOO_BIG')
+    }
+    out.push({ rel, mode: mode & 0o777, data })
+  }
+
+  if (off !== buf.length) {
+    throw new UnpackError(
+      `包末尾还有 ${buf.length - off} 个多余字节 —— 正常的包不会有，可能被拼接或损坏了`,
+      'TRAILING_GARBAGE')
+  }
+  return out
+}
+
+/**
+ * 解包并写到磁盘。
+ *
+ * @param {Buffer|Uint8Array} bytes `.fkz` 的内容
+ * @param {string} dir 解到哪个目录（不存在会建）
+ * @param {{force?:boolean}} [o] `force`：目标文件已存在时是否覆盖（默认**不覆盖**）
+ * @returns {Promise<{files:{rel:string,bytes:number}[], bytes:number, dir:string}>}
+ */
+export async function unpackToDir(bytes, dir, { force = false } = {}) {
+  const entries = unpackArchive(bytes)
+  await mkdir(dir, { recursive: true })
+  const written = []
+  let total = 0
+  for (const e of entries) {
+    const dest = path.join(dir, e.rel)
+    if (!force && existsSync(dest)) {
+      throw new UnpackError(
+        `目标已经存在：${e.rel} —— 不覆盖（确定要覆盖就加 --force；或者换一个 --dir）`,
+        'EXISTS')
+    }
+    await mkdir(path.dirname(dest), { recursive: true })
+    await writeFile(dest, e.data)
+    // 可执行位只在 POSIX 上有意义；Windows 没有这个概念（zip 里也带不住）
+    if (process.platform !== 'win32' && (e.mode & 0o111)) {
+      try { await chmod(dest, e.mode | 0o600) } catch { /* 尽力而为 */ }
+    }
+    written.push({ rel: e.rel, bytes: e.data.length })
+    total += e.data.length
+  }
+  return { files: written, bytes: total, dir }
 }

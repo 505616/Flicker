@@ -78,7 +78,7 @@ if (!globalThis.__flickerRoot) {
 import { EXIT } from '../src/destroy.js'
 import { RateLimiter, parseRate } from '../src/rate.js'
 import { parseChunkSpec } from '../src/chunk-size.js'
-import { sourcePackFingerprint, SOURCE_PACK_ASSET } from '../src/gift.js'
+import { sourcePackFingerprint, SOURCE_PACK_ASSET, unpackToDir } from '../src/gift.js'
 import { runRecv, defaultSaveDir } from '../src/recv.js'
 import { matchFingerprint, parseRecvLink, probePeer, pullFromLink } from '../src/pull.js'
 import { tty } from '../src/tty.js'
@@ -94,6 +94,7 @@ const USAGE = `
     flicker recv --listen            同上（显式写法）
     flicker recv <链接>               用**程序自己**接收对方给的直连链接（逐块校验、落盘）
     flicker recv <链接> --browser      同上，但改用浏览器打开（中继链接也只能这样）
+    flicker unpack <文件.fkz>          解开对方随文件送来的源码包（--dir=目录 / --force 覆盖）
     flicker --version                 显示版本号
     flicker --assets                  显示内嵌资源的指纹（核对产物是不是最新）
 
@@ -423,6 +424,49 @@ async function main() {
     }
     if (flags['no-open'] !== true) openPath(outDir)
     return EXIT.OK
+  }
+
+  // ── 解开收到的源码包（`flicker unpack <文件.fkz>`）──
+  //
+  // 这条命令的存在理由很具体：**把源码送给对方**这件事以前只做了一半 ——
+  // 对方拿到 `.fkz` 之后，产品里没有任何东西能打开它（连"我们自己"都不能）。
+  // 现在可以了，而且用的是**收到的那份程序**（exe），不需要装 Node、不需要别的工具。
+  //
+  // 安全上不信任这个包（它可能来自别人、甚至被伪造过）：路径、UTF-8、重复项、
+  // 截断与尾部垃圾都由 `unpackArchive()` 挡，这里的职责只是"选目录 + 落盘 + 说结果"。
+  if (cmd === 'unpack') {
+    const file = positional[1]
+    if (!file) {
+      process.stderr.write('  ✗ 给一个 .fkz 文件的路径：flicker unpack <文件.fkz> [--dir=目录] [--force]\n')
+      return EXIT.USAGE
+    }
+    let buf
+    try {
+      buf = await readFile(file)
+    } catch (e) {
+      process.stderr.write(`  ✗ 读不到 ${file}：${e?.code === 'ENOENT' ? '文件不存在' : (e?.message ?? e)}\n`)
+      return EXIT.USAGE
+    }
+    const base = path.basename(file).replace(/\.fkz$/i, '')
+    const into = typeof flags.dir === 'string' && flags.dir
+      ? flags.dir
+      : path.join(path.dirname(path.resolve(file)), base)
+    try {
+      const r = await unpackToDir(buf, into, { force: flags.force === true })
+      if (flags.machine === true) {
+        process.stdout.write(`__UNPACKED__ ${r.dir} ${r.files.length} ${r.bytes}\n`)
+      } else {
+        process.stdout.write(`  ✓ 解开 ${r.files.length} 个文件（${r.bytes} 字节）→ ${r.dir}\n`)
+        process.stdout.write('  ' +
+          '想看它是什么：node bin/flicker.js --help（需要 Node 24+）；' +
+          '只想看代码，直接用编辑器打开那个目录即可\n')
+      }
+      return EXIT.OK
+    } catch (e) {
+      process.stderr.write(`  ✗ ${e?.message ?? e}\n`)
+      // "目标已存在"是**用法**问题（换个目录、或加 --force），不是程序出错
+      return e?.code === 'EXISTS' ? EXIT.USAGE : EXIT.ERROR
+    }
   }
 
   // ── 发送（默认行为）──
