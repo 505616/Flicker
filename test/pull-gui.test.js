@@ -69,6 +69,14 @@ function startSender(args) {
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     live.push(child)
     let out = '', err = ''
+    // ⚠️ 退出码要**先记下来**，不能靠在用例里临时挂 `exit` 监听器。
+    //    这条在 CI 的 Ubuntu 上红过一次：那边传得快，发送端在用例挂监听器**之前**
+    //    就已经退出了，于是等到超时也拿不到码（`null !== 0`，看起来像"发送端没退出"）。
+    //    事件不会为后来的监听器重放 —— 所以在这里就把它变成一条可 await 的 promise。
+    let exitCode = null
+    const exited = new Promise((res) => {
+      child.on('exit', (code) => { exitCode = code; res(code) })
+    })
     const timer = setTimeout(() => {
       try { child.kill() } catch { /* 已退出 */ }
       reject(new Error(`发送端启动超时\n${out}\n${err}`))
@@ -83,6 +91,12 @@ function startSender(args) {
         resolve({
           child, base: m[1], token: m[2], fingerprint: fp[1],
           link: `${m[1]}/?k=${m[2]}`, getOut: () => out, getErr: () => err,
+          /** 等它自己退出；超时返回 null（已经退出的话立刻拿到码） */
+          waitExit: (ms = 20000) => Promise.race([
+            exited,
+            new Promise((r) => setTimeout(() => r(null), ms)),
+          ]),
+          exitCode: () => exitCode,
         })
       }
     }
@@ -156,10 +170,6 @@ async function waitPull(api, pred, { ms = 60000, what = '接收状态' } = {}) {
   throw new Error(`等「${what}」超时，最后一次状态：${JSON.stringify(last)}`)
 }
 
-const waitExit = (child, ms = 20000) => new Promise((resolve) => {
-  const t = setTimeout(() => resolve(null), ms)
-  child.on('exit', (code) => { clearTimeout(t); resolve(code) })
-})
 
 // ── ① 真的收得下来 ─────────────────────────────────────────
 
@@ -223,7 +233,7 @@ test('⭐ 界面：探测 → 核对指纹 → 开始 → 收完（逐字节一�
   }
 
   // ⑥ 发送端因为收到 /api/done 而收尾退出（协议里的完成判据，用完即销毁）
-  assert.equal(await waitExit(sender.child), 0, '发送端应当在收到 /api/done 之后正常退出')
+  assert.equal(await sender.waitExit(), 0, '发送端应当在收到 /api/done 之后正常退出')
 })
 
 // ── ② 不核对就不许开始 ──────────────────────────────────────
