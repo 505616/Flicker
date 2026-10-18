@@ -102,6 +102,44 @@ if (missing.length) {
   console.log(`✓ CI 与 npm run check 跑的是同一批判据（${commands.length} 条，一条不缺）`)
 }
 
+/**
+ * 结构体检：`steps:` 底下**只能是 `- ` 开头的条目**。
+ *
+ * 为什么加这条：2026-10 我把一个 job 级 `env:` 贴到了 steps 列表里（缩进 6 空格）。
+ * 结果 YAML 非法，GitHub **连 job 都建不出来** —— run 状态直接 failure、`jobs` 计数为 0，
+ * 日志里没有任何有用信息，白丢了一整轮 CI（私有仓库还白烧额度）。
+ * 这里只做这一条最便宜的检查：不需要 YAML 解析器，也正好覆盖那次的实际错误。
+ */
+function structureProblems(text) {
+  const lines = text.split(String.fromCharCode(10))
+  const problems = []
+  let inSteps = false
+  let stepsIndent = -1
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.trim() || line.trim().startsWith('#')) continue
+    const indent = line.match(/^ */)[0].length
+    if (/^\s*steps:\s*$/.test(line)) { inSteps = true; stepsIndent = indent; continue }
+    if (!inSteps) continue
+    // 退出 steps 块：缩进回到 steps 同级或更浅，且不是列表项
+    if (indent <= stepsIndent) { inSteps = false; continue }
+    if (indent === stepsIndent + 2 && !/^\s*- /.test(line)) {
+      problems.push(`第 ${i + 1} 行：steps 列表里出现了不是 \`- \` 开头的条目 —— ${line.trim()}`)
+    }
+  }
+  return problems
+}
+
+const structure = structureProblems(readFileSync(ciPath, 'utf8'))
+if (structure.length) {
+  bad++
+  console.error('\n✗ CI 文件结构不对（GitHub 会直接拒绝整份 workflow，连 job 都建不出来）：')
+  for (const p of structure) console.error(`    · ${p}`)
+  console.error('  `env:` 这类键要写在 **job 级**（4 空格），不能贴在 steps 列表里。')
+} else {
+  console.log('✓ CI 文件的 steps 结构正常（列表项都以 `- ` 开头）')
+}
+
 // 反向的提醒（不算失败）：CI 里多跑的东西是正常的，但值得说出来，方便核对
 const extra = [...inCi].filter((c) => !commands.includes(c))
 if (extra.length) {

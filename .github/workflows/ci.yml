@@ -36,21 +36,25 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
+    # ⚠️ `FLICKER_NO_CERT_INSTALL=1`：**CI 上不能往系统信任库装根证书**。
+    #    那个动作会弹出系统的"是否安装此根证书"确认框 —— 真机上由用户点"是"
+    #    （2026-10 用户确认："Windows 的证书安装之前都是我点的"），CI 上没人点，
+    #    certutil 就一直等：第一次 CI 因此把 Windows 那个 job 挂了 25 分钟。
+    #    设了它之后，与证书库装卸相关的那几条用例会**明确跳过并说明原因**（不是假装通过），
+    #    其余用例照常跑。这条能力只在真机上有效验证。
+    #
+    # ⚠️ 它必须是 **job 级**的 `env:`：写在 steps 列表里（缩进 6 空格）会让整份 workflow
+    #    变成非法 YAML —— GitHub 连 job 都建不出来（run 直接 failure、jobs 计数为 0）。
+    #    2026-10 就这么把 CI 弄坏过一次，记在这里。
+    env:
+      FLICKER_NO_CERT_INSTALL: '1'
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-
-      # ⚠️ `FLICKER_NO_CERT_INSTALL=1`：**CI 上不能往系统信任库装根证书**。
-      #    那个动作会弹出系统的"是否安装此根证书"确认框 —— 真机上由用户点"是"
-      #    （2026-10 用户确认："Windows 的证书安装之前都是我点的"），CI 上没人点，
-      #    certutil 就一直等：第一次 CI 因此把 Windows 那个 job 挂了 25 分钟。
-      #    设了它之后，与证书库装卸相关的那几条用例会**明确跳过并说明原因**
-      #    （不是假装通过），其余用例照常跑。这条能力只在真机上有效验证。
-      env:
-        FLICKER_NO_CERT_INSTALL: '1'
 
       - name: 环境
         run: node --version

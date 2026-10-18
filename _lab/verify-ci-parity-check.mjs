@@ -65,6 +65,16 @@ const cases = [
     },
   },
   {
+    // 2026-10 真踩过：把一个 job 级 `env:` 贴进了 steps 列表（缩进 6 空格）。
+    // YAML 非法 → GitHub 连 job 都建不出来（run 直接 failure、jobs 计数为 0），
+    // 白丢一整轮 CI。判据现在会当场点名那一行。
+    name: 'steps 列表里混进了 job 级的键（缩进写错了）', mustFail: true,
+    mutate: () => ({
+      ci: ciText.replace(/^ {6}- name: 环境$/m,
+        "      env:\n        FLICKER_NO_CERT_INSTALL: '1'\n\n      - name: 环境"),
+    }),
+  },
+  {
     name: '只是多写了 node / 多几个空格（格式噪音）→ 不该报错', mustFail: false,
     mutate: () => ({ ci: ciText.replace('run: node gen/check-temp-dirs.mjs', 'run:   node    gen/check-temp-dirs.mjs  ') }),
   },

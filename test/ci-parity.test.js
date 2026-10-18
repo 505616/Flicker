@@ -42,6 +42,7 @@ test('⭐ 反向验证：CI 漏掉一条本地判据 → 检查如实报错（�
   assert.match(r.stdout, /删掉一条检查步骤.*如实报错/)
   assert.match(r.stdout, /改了名.*如实报错/)
   assert.match(r.stdout, /多了一条 CI 没有的判据.*如实报错/)
+  assert.match(r.stdout, /steps 列表里混进了 job 级的键.*如实报错/)
   assert.match(r.stdout, /格式噪音.*正确地没有报错/)
 })
 
