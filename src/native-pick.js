@@ -106,20 +106,50 @@ export function buildPickCommand({ platform = process.platform, title = '', star
     //    在 MTA 线程里创建会抛 "Current thread must be set to single thread
     //    apartment (STA) mode"。pwsh 7 也能跑，但它的 `-STA` 只在 Windows 上成立，
     //    用 `System32` 里那个 5.1 更稳。
+    //
+    // ⚠️⚠️ 2026-10 用户实测："系统对话框没有弹出来"。实测（`_lab` 里那几个探针）
+    //    查清了原因：对话框**确实被创建了**（进程里有一个可见的 `#32770` 窗口），
+    //    但它是被一个**没有前台窗口**的进程弹出来的 —— Windows 的前台规则会把它
+    //    压到浏览器窗口后面，用户就以为"没反应"。
+    //    所以现在：先造一个 1×1、透明、`TopMost` 的主人窗口并把它提到前台，
+    //    再 `ShowDialog($owner)` —— 模态子窗口会跟着主人一起到最前面。
+    //    这条只能靠"在真机上看得见"来验，判据只验脚本里有这几步。
     const script = [
       // ⚠️ 必须把控制台输出编码钉成 UTF-8：Windows 上默认是本地代码页（GBK…），
       //    而 Node 按 UTF-8 解码子进程的 stdout —— 中文文件夹名（`D:\闪传`）会变成乱码。
       '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
       'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+      'Add-Type -TypeDefinition \'using System; using System.Runtime.InteropServices; ' +
+        'public class FlickerFore { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); ' +
+        '[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h); }\' | Out-Null',
+      '[System.Windows.Forms.Application]::EnableVisualStyles()',
+      '$o = New-Object System.Windows.Forms.Form',
+      `$o.Text = ${psQuote(t)}`,
+      '$o.ShowInTaskbar = $false',
+      '$o.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None',
+      '$o.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen',
+      '$o.Size = New-Object System.Drawing.Size(1, 1)',
+      '$o.Opacity = 0.01',
+      '$o.TopMost = $true',
       '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
       `$d.Description = ${psQuote(t)}`,
       '$d.ShowNewFolderButton = $true',
       startDir ? `try { $d.SelectedPath = ${psQuote(startDir)} } catch { }` : '',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+      // 主人窗口一显示就把它顶到最前（能失败，失败也继续 —— 别为了置顶把功能弄没了）
+      '$o.Add_Shown({ try { [void][FlickerFore]::BringWindowToTop($o.Handle); ' +
+        '[void][FlickerFore]::SetForegroundWindow($o.Handle) } catch { } })',
+      '$o.Show()',
+      '[System.Windows.Forms.Application]::DoEvents()',
+      // 打开对话框这件事写到 stderr 上图个可观察：界面日志里能看到"到底弹了没有"
+      '[Console]::Error.Write("dialog-opening" + [Environment]::NewLine)',
+      '$r = $d.ShowDialog($o)',
+      '$o.Close()',
+      'if ($r -eq [System.Windows.Forms.DialogResult]::OK) {',
       '  [Console]::Out.Write($d.SelectedPath)',
       '} else { exit 3 }',
     ].filter(Boolean).join('\n')
-    return { cmd, args: ['-NoProfile', '-NonInteractive', '-STA', '-Command', script] }
+    // 去掉 `-NonInteractive`：它一不影响 GUI，二会让某些宿主更倾向于"没人看着"的运行方式。
+    return { cmd, args: ['-NoProfile', '-STA', '-Command', script] }
   }
   if (platform === 'darwin') {
     const where = startDir ? ` default location POSIX file ${asQuote(startDir)}` : ''
@@ -182,7 +212,11 @@ export async function pickFolder(opts = {}) {
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r) } }
     const timer = setTimeout(() => {
       try { child.kill() } catch { /* 已经退出 */ }
-      finish({ ok: false, reason: 'failed', error: `对话框等了 ${Math.round(timeoutMs / 60000)} 分钟没有响应` })
+      finish({
+        ok: false, reason: 'failed',
+        error: `对话框等了 ${Math.round(timeoutMs / 60000)} 分钟没有响应`,
+        stderr: err.trim(),
+      })
     }, timeoutMs)
     child.stdout?.on('data', (b) => { out += b.toString() })
     child.stderr?.on('data', (b) => { err += b.toString() })
@@ -190,6 +224,10 @@ export async function pickFolder(opts = {}) {
       // 命令不存在 / 没有图形会话（Linux 上没有 DISPLAY）都走这里
       finish({ ok: false, reason: 'unsupported', error: e?.message ?? String(e) })
     })
-    child.on('exit', (code) => finish(parsePickResult({ platform, code, stdout: out, stderr: err })))
+    child.on('exit', (code) => {
+      // stderr 一路带回去：Windows 上脚本会写一行 `dialog-opening`，
+      // 界面日志里能看出"到底弹出来了没有"（用户报"没弹"时这是唯一的线索）。
+      finish({ ...parsePickResult({ platform, code, stdout: out, stderr: err }), stderr: err.trim() })
+    })
   })
 }

@@ -51,6 +51,22 @@ test('Windows：用 System32 里的 PowerShell 5.1 + -STA（FolderBrowserDialog 
   assert.match(script, /D:\\闪传/, '起始目录要带进 SelectedPath')
 })
 
+test('⭐ Windows：先造一个 TopMost 主人窗口再 ShowDialog(owner)（否则窗口会被压在浏览器后面）', () => {
+  // 2026-10 用户实测"系统对话框没有弹出来"：实测发现对话框**建出来了**
+  // （进程里有可见的 #32770），但发起它的进程没有前台窗口，Windows 把它压到后面。
+  const c = buildPickCommand({
+    platform: 'win32', title: '存到哪', startDir: 'D:\\x',
+    env: { ...process.env, SystemRoot: 'C:\\Windows' }, exists: () => true,
+  })
+  const script = c.args[c.args.length - 1]
+  assert.match(script, /\$o\.TopMost = \$true/, '主人窗口必须是 TopMost')
+  assert.match(script, /ShowDialog\(\$o\)/, '对话框要挂在主人窗口上（模态子窗口跟主人一起到前面）')
+  assert.match(script, /SetForegroundWindow/, '显示时要试着抢一次前台')
+  assert.match(script, /dialog-opening/, '要往 stderr 写一行标记，界面日志据此判断"到底弹了没有"')
+  assert.match(script, /\$o\.Close\(\)/, '选完要把主人窗口收掉（否则留一个 1×1 的透明窗口）')
+  assert.ok(!c.args.includes('-NonInteractive'), '去掉 -NonInteractive：它只影响控制台提示，留着没好处')
+})
+
 test('Windows：没有 System32 里那个 PowerShell 就不给命令（不猜别的）', () => {
   const c = buildPickCommand({
     platform: 'win32', title: 'x', env: { SystemRoot: 'C:\\nowhere', windir: 'C:\\nowhere' },
@@ -178,16 +194,20 @@ const runLinux = (onRun, opts = {}) => pickFolder({
   ...opts,
 })
 
-test('子进程给出路径 → ok', async () => {
+test('子进程给出路径 → ok（顺带带回 stderr，供界面日志判断"到底弹了没有"）', async () => {
   assert.deepEqual(await runLinux((child) => {
-    setTimeout(() => { child.stdout.emit('data', Buffer.from('/tmp/x\n')); child.emit('exit', 0) }, 5)
-  }), { ok: true, path: '/tmp/x' })
+    setTimeout(() => {
+      child.stderr.emit('data', Buffer.from('dialog-opening\n'))
+      child.stdout.emit('data', Buffer.from('/tmp/x\n'))
+      child.emit('exit', 0)
+    }, 5)
+  }), { ok: true, path: '/tmp/x', stderr: 'dialog-opening' })
 })
 
 test('子进程退出码 1 且没有 stderr → cancelled（zenity 的取消长这样）', async () => {
   assert.deepEqual(await runLinux((child) => {
     setTimeout(() => child.emit('exit', 1), 5)
-  }), { ok: false, cancelled: true })
+  }), { ok: false, cancelled: true, stderr: '' })
 })
 
 test('超时 → failed（并且真的去 kill 了那个子进程）', async () => {

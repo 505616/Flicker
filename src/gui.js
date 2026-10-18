@@ -936,8 +936,17 @@ export async function runGui(opts = {}) {
     const title = String(body.title ?? '').trim()
     const startDir = String(body.startDir ?? '').trim() || defaultSaveDir()
     const r = await pickFolder({ title, startDir })
+    // ⚠️ **每一种结果都要打一行**：2026-10 用户报"系统对话框没有弹出来"，
+    //    而当时只有"成功了"和"这台机器没有"两种会留痕 —— 正好把最需要线索的那两种
+    //    （用户取消 / 弹了但失败）吞掉了，只能靠猜。
     if (r.ok) log(`  · 保存文件夹：${r.path}`)
-    else if (r.reason === 'unsupported') log('  · 这台机器没有可用的系统文件夹对话框，改用它自带的选择器')
+    else if (r.cancelled) log('  · 用户取消了系统文件夹窗口')
+    else if (r.reason === 'unsupported') {
+      log(`  · 这台机器没有可用的系统文件夹对话框${r.error ? '（' + r.error + '）' : ''}，改用它自带的选择器`)
+    } else {
+      log(`  ! 系统文件夹窗口打不开（${r.reason}）：${r.error ?? ''}` +
+        `${r.stderr ? ' ｜ ' + r.stderr.split('\n').join(' / ') : ''} —— 改用它自带的选择器`)
+    }
     return r
   }
 

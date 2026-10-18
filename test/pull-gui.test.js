@@ -454,3 +454,22 @@ test('接口：新建文件夹真的建得出来；名字里带分隔符/越权�
   const outside = await readdir(path.join(work, '..'))
   assert.ok(!outside.includes('escape'), '越权那一笔不能真的建出来')
 })
+
+test('系统文件夹窗口被挡住时，页面要给一条退路（用户报过"没有弹出来"）', { timeout: 60000 }, async () => {
+  const html = await readFile(path.join(ROOT, 'web', 'station.html'), 'utf8')
+
+  // 等的时候按钮要有反馈（否则用户只会觉得"点了没反应"）
+  assert.match(html, /btn\.textContent = t\('send\.browse\.opening'\)/, '等待时按钮要显示"正在打开系统窗口…"')
+  assert.match(html, /btn\.disabled = true/, '等待期间不许重复点')
+  // 6 秒还没结果 → 摆出"改用自带选择器"的退路
+  assert.match(html, /t\('send\.browse\.noWindow'\)/, '要有"没看到系统窗口"的提示')
+  assert.match(html, /t\('send\.browse\.useBuiltin'\)/, '要有"改用自带选择器"的按钮')
+  assert.match(html, /\}, 6000\);/, '退路在 6 秒后出现（等太久用户已经放弃了）')
+  // 每条结果都要还原按钮（不能一次失败之后按钮永远变样）
+  assert.match(html, /finally \{[\s\S]{0,200}btn\.textContent = origLabel/, '不管成功失败都要还原按钮文字')
+
+  // 后端：每一种结果都要留痕（2026-10 那次只有"成功/不支持"两种，正好少了最需要的线索）
+  const gui = await readFile(path.join(ROOT, 'src', 'gui.js'), 'utf8')
+  assert.match(gui, /用户取消了系统文件夹窗口/, '取消也要在日志里留一行')
+  assert.match(gui, /系统文件夹窗口打不开/, '失败要打原因（含 stderr）')
+})
