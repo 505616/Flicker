@@ -197,7 +197,15 @@ for (const job of jobs) {
       continue
     }
     const started = Date.now()
-    const r = spawnSync(step.run, { cwd: ROOT, shell: true, encoding: 'utf8' })
+    // ⚠️ 把 CI 的**job 级 env** 也带上：`FLICKER_NO_CERT_INSTALL=1` 写在 ci.yml 的 job 上
+    //    （不是某一步的 `run:` 行里），预演脚本照 `run:` 行逐条跑，自然就漏了它 ——
+    //    于是本地预演会在"装证书进系统信任库"那一步弹 Windows 确认框等人点，
+    //    看起来像"预演失败"，而 CI 上永远不会发生。2026-10 在 `verify-fresh-clone` 里
+    //    先踩到这个，顺手把预演脚本也补上。
+    const r = spawnSync(step.run, {
+      cwd: ROOT, shell: true, encoding: 'utf8',
+      env: { ...process.env, FLICKER_NO_CERT_INSTALL: '1' },
+    })
     const took = ((Date.now() - started) / 1000).toFixed(1)
     ran++
     if (r.status === 0) {

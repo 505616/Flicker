@@ -33,9 +33,20 @@ import { makeTempDir, removeTempDir } from '../gen/tmp.mjs'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const checkOnly = process.argv.includes('--check-only')
 
-/** 跑一条命令并把输出接回来（失败时把尾巴打出来，别只给一个退出码） */
-function run(cmd, args, cwd, { label } = {}) {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', env: { ...process.env } })
+/**
+ * 跑一条命令并把输出接回来（失败时把尾巴打出来，别只给一个退出码）。
+ *
+ * ⚠️ 默认把 `FLICKER_NO_CERT_INSTALL=1` 传下去，**和 CI 保持一致**：
+ *    CI 里这个变量是 job 级 env（见 `.github/workflows/ci.yml`）。不设它的话，
+ *    「把证书装进系统信任库」那一步会在这里弹一个 **Windows 确认框**等人点，
+ *    于是 `test/gui.test.js` 里"等服务就绪"那条用例卡满 40 秒后失败 ——
+ *    而 CI 上永远不会发生（它设了变量）。2026-10 实测踩到：这道体检本该**预测 CI**，
+ *    却因为环境不一致，报出了一个 CI 上不存在的失败。
+ */
+function run(cmd, args, cwd, { label, env } = {}) {
+  const r = spawnSync(cmd, args, {
+    cwd, encoding: 'utf8', env: { ...process.env, FLICKER_NO_CERT_INSTALL: '1', ...env },
+  })
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
   return { status: r.status, out, label }
 }
