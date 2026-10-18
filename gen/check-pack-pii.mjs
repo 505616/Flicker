@@ -37,8 +37,8 @@ const FORBIDDEN_PATHS = [
   { re: /(^|\/)\.npmrc$/, why: '可能含 npm token' },
 ]
 
-/** B. 内容里不该出现的东西 */
-const CONTENT = [
+/** B. 内容里不该出现的东西（导出是为了让 `test/pack-pii.test.js` 能直接验这些规则本身） */
+export const CONTENT = [
   { name: '邮箱地址', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
   // 32 位十六进制：Cloudflare 账号 id 长这样（Node SEA 的哨兵也长这样，见 ALLOW）
   { name: '32 位十六进制（疑似账号 id）', re: /\b[0-9a-f]{32}\b/g },
@@ -47,6 +47,13 @@ const CONTENT = [
   { name: '作者账号', re: /\b1UWD\b|\b505645716\b/g },
   // 示例用的私网地址（192.168.1.x 这类）在文档里是**需要的**，见 ALLOW
   { name: '局域网 IP', re: /\b192\.168\.\d{1,3}\.\d{1,3}\b/g },
+  // 真实可路由的公网 IPv4：作者家的出口地址、实测时的跳数都属于个人信息。
+  // 排除：私网 / 回环 / 链路本地 / 运营商 CGNAT（100.64/10）/ 文档保留段
+  // （192.0.2、198.51.100、203.0.113）/ 组播与保留段 / ASN.1 OID（2.5.x、1.3.6.x）
+  {
+    name: '公网 IPv4',
+    re: /(?<![\d.])(?!10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|22[4-9]\.|2[3-5]\d\.)(?!2\.5\.|1\.3\.6\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/g,
+  },
 ]
 
 /**
@@ -98,6 +105,32 @@ const ALLOW = [
     why: '文档与测试里的占位写法（C:\\Users\\…）',
   },
   {
+    file: /^(src|test|_lab)\//,
+    pattern: '公网 IPv4',
+    why: '这里的点分数字是 **ASN.1 OID**（`2.5.29.19` 这类证书扩展标识）或测试用的假地址' +
+      '（`1.2.3.4`），不是任何人的网络地址。OID 形状已尽量在正则里排除，' +
+      '但有些写法（拼在字符串里）只能靠这条例外',
+  },
+  {
+    file: /^(中文文档|docs)\/(设计文档|中继部署)\.md$|^(变更记录|CHANGELOG)\.md$/,
+    pattern: '公网 IPv4',
+    why: '这里保留的是**公共 DNS 服务器**（`114.114.114.114` 等）与一次 DNS 污染的实测结果' +
+      '（`199.16.156.103`）—— 都不是作者的地址。作者家的出口 IP 与运营商跳数已隐去' +
+      '（2026-10 用户要求公开仓库前清理个人信息）',
+  },
+  {
+    file: /^test\/pack-pii\.test\.js$/,
+    pattern: '作者账号',
+    why: '规则测试必须**举出**这两个账号名才能证明"它们真的会被抓住" —— ' +
+      '它是判据自己的样本，不是作者署名（署名在 `原始需求以及作者的话.md`，那是另一条例外）',
+  },
+  {
+    file: /^gen\/check-pack-pii\.mjs$/,
+    pattern: '公网 IPv4',
+    why: '判据自己必须把模式写出来才能去找它 —— 这里出现的点分数字是**正则字面量**，' +
+      '和"作者地址"的 DENY_ANYWHERE 跳过自己是同一个道理',
+  },
+  {
     file: /^(src|_lab|test|ui-prototype\.html|读我\.md|README\.md)/,
     pattern: '局域网 IP',
     why: '注释/实测报告/测试里的**示例地址**（已统一为 192.168.1.x 这类中性写法）。' +
@@ -105,50 +138,56 @@ const ALLOW = [
   },
 ]
 
-const files = await collectSourceFiles(ROOT)
-const problems = []
+// 只有在"直接运行"时才执行判据本身：被 `test/pack-pii.test.js` import 时只提供规则，
+// 否则那条测试一 import 就会把整个检查跑一遍（还有可能在失败时把测试进程 exit 掉）。
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+if (isMain) {
+  const files = await collectSourceFiles(ROOT)
+  const problems = []
 
-for (const f of files) {
-  for (const p of FORBIDDEN_PATHS) {
-    if (p.re.test(f.rel)) problems.push(`包里不该有这个文件：${f.rel}（${p.why}）`)
+  for (const f of files) {
+    for (const p of FORBIDDEN_PATHS) {
+      if (p.re.test(f.rel)) problems.push(`包里不该有这个文件：${f.rel}（${p.why}）`)
+    }
   }
-}
 
-for (const f of files) {
-  const text = f.data.toString('utf8')
-  // 先查"任何文件都不许有"的（没有允许清单）
-  //
-  // ⚠️ 判据脚本**自己**要跳过：它必须写出那个模式才能去找它，否则它连自己都抓。
-  //    （内容类判据（邮箱等）照旧扫这个文件 —— 只有"作者地址"这一条跳过。）
-  const isCheckerItself = f.rel === 'gen/check-pack-pii.mjs'
-  for (const d of DENY_ANYWHERE) {
-    if (isCheckerItself) break
-    const m = text.match(d.re)
-    if (!m) continue
-    const uniq = [...new Set(m)]
-    problems.push(`${f.rel} 命中「${d.name}」：${uniq.slice(0, 3).join('、')} —— ` +
-      '作者本机的地址不该出现在任何会发出去的文件里')
+  for (const f of files) {
+    const text = f.data.toString('utf8')
+    // 先查"任何文件都不许有"的（没有允许清单）
+    //
+    // ⚠️ 判据脚本**自己**要跳过：它必须写出那个模式才能去找它，否则它连自己都抓。
+    //    （内容类判据（邮箱等）照旧扫这个文件 —— 只有"作者地址"这一条跳过。）
+    const isCheckerItself = f.rel === 'gen/check-pack-pii.mjs'
+    for (const d of DENY_ANYWHERE) {
+      if (isCheckerItself) break
+      const m = text.match(d.re)
+      if (!m) continue
+      const uniq = [...new Set(m)]
+      problems.push(`${f.rel} 命中「${d.name}」：${uniq.slice(0, 3).join('、')} —— ` +
+        '作者本机的地址不该出现在任何会发出去的文件里')
+    }
+    for (const c of CONTENT) {
+      const m = text.match(c.re)
+      if (!m) continue
+      const allowed = ALLOW.find((a) => {
+        try { return a.file.test(f.rel) && a.pattern === c.name } catch { return false }
+      })
+      if (allowed) continue
+      const uniq = [...new Set(m)]
+      problems.push(`${f.rel} 命中「${c.name}」${uniq.length} 处：` +
+        uniq.slice(0, 3).map((v) => v.slice(0, 60)).join('、') +
+        (uniq.length > 3 ? ` …共 ${uniq.length} 个` : ''))
+    }
   }
-  for (const c of CONTENT) {
-    const m = text.match(c.re)
-    if (!m) continue
-    const allowed = ALLOW.find((a) => {
-      try { return a.file.test(f.rel) && a.pattern === c.name } catch { return false }
-    })
-    if (allowed) continue
-    const uniq = [...new Set(m)]
-    problems.push(`${f.rel} 命中「${c.name}」${uniq.length} 处：` +
-      uniq.slice(0, 3).map((v) => v.slice(0, 60)).join('、') +
-      (uniq.length > 3 ? ` …共 ${uniq.length} 个` : ''))
-  }
-}
 
-if (problems.length) {
-  console.error(`✗ 赠品源码包里有 ${problems.length} 处不该带出去的东西：`)
-  for (const p of problems) console.error('   ' + p)
-  console.error('\n  处理办法：')
-  console.error('    · 是凭据/本地状态 → 加进 src/gift.js 的 PACK_EXCLUDES，并从工作树里删掉')
-  console.error('    · 是刻意保留的（作者署名、实测证据）→ 加进本文件顶部的 ALLOW，并写清理由')
-  process.exit(1)
+  if (problems.length) {
+    console.error(`✗ 赠品源码包里有 ${problems.length} 处不该带出去的东西：`)
+    for (const p of problems) console.error('   ' + p)
+    console.error('\n  处理办法：')
+    console.error('    · 是凭据/本地状态 → 加进 src/gift.js 的 PACK_EXCLUDES，并从工作树里删掉')
+    console.error('    · 是刻意保留的（作者署名、实测证据）→ 加进本文件顶部的 ALLOW，并写清理由')
+    process.exit(1)
+  }
+  console.log(`✓ 赠品源码包干净（${files.length} 个文件，无凭据、无个人信息）`)
+
 }
-console.log(`✓ 赠品源码包干净（${files.length} 个文件，无凭据、无个人信息）`)
