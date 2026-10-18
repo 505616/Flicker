@@ -47,6 +47,8 @@ const EN = path.join(ROOT, 'docs')
  */
 const ROOT_PAIRS = [
   ['变更记录.md', 'CHANGELOG.md'],
+  // 2026-10 作者要求把「原始需求以及作者的话」放到根目录（中英各一份）
+  ['原始需求以及作者的话.md', 'AUTHOR-NOTES.md'],
 ]
 
 let bad = 0

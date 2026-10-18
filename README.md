@@ -235,7 +235,7 @@ This table says what's where (links go to the English copies):
 | [构建单文件.md](docs/构建单文件.md) | Building the single-file executable |
 | [UI设计.md](docs/UI设计.md) | Interface design notes, screen by screen |
 | [路线图.md](docs/路线图.md) | Roadmap, release criteria, measured performance |
-| [原始需求以及作者的话.md](docs/原始需求以及作者的话.md) | Why this program exists —— the author's original request, verbatim |
+| [原始需求以及作者的话.md](AUTHOR-NOTES.md) | Why this program exists —— the author's original request, verbatim |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each release, plus the **measured numbers and lessons** |
 | [读我.md](读我.md) | The Chinese README |
 

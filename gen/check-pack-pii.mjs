@@ -95,7 +95,7 @@ const ALLOW = [
       '作者本机那一段地址由上面的 DENY_ANYWHERE 单独挡着，不走这条例外',
   },
   {
-    file: /^(中文文档|docs)\/原始需求以及作者的话\.md$/,
+    file: /^(原始需求以及作者的话\.md|AUTHOR-NOTES\.md)$/,
     pattern: '作者账号',
     why: '那一篇就是作者自己写的自我介绍（B站/Steam 账号），是**有意保留**的署名',
   },
@@ -122,7 +122,7 @@ const ALLOW = [
     file: /^test\/pack-pii\.test\.js$/,
     pattern: '作者账号',
     why: '规则测试必须**举出**这两个账号名才能证明"它们真的会被抓住" —— ' +
-      '它是判据自己的样本，不是作者署名（署名在 `原始需求以及作者的话.md`，那是另一条例外）',
+      '它是判据自己的样本，不是作者署名（署名在根目录的 `原始需求以及作者的话.md` / `AUTHOR-NOTES.md`，那是另一条例外）',
   },
   {
     file: /^gen\/check-pack-pii\.mjs$/,

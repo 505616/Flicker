@@ -2,10 +2,11 @@
 
 > This file holds the **original request** written to the AI at the start of the project,
 > plus a few words the author added later.
-> The text is kept as it was —— only subheadings were added and run-on sentences were split into
-> paragraphs; **not a single word was changed**.
-> (It started life as a scratch file called `新建文本文档.txt` on the desktop; once its content was
-> copied in here, that scratch file was deleted.)
+> The text is kept essentially as it was —— only subheadings were added and run-on sentences were
+> split into paragraphs.
+> **Two changes the author asked for in 2026-10**: the contact details were replaced with a Steam
+> friend code and a Bilibili account, and a note was added about what "tested and passing" means
+> (he does not have enough devices to verify everything).
 
 ## The original request
 
@@ -25,7 +26,15 @@ My English is very poor. If there is a request or a bug report in English, I wil
 
 Bug fixes and development will not be fast, because I do not have that much time.
 
-If you find a bug, you can search for the account 1UWD on Bilibili —— the user with a few dozen followers and a dozen or so videos, the one with the default avatar, that is me. You can also search for my name 505645716 on Steam and add me as a friend. You can of course also post it on GitHub, but right now I do not know how to use GitHub, not at all, so I will ask DeepSeek for guidance.
+If you find a bug, you can reach me like this: **search the Steam friend code 1054809675**, or
+**search for 1UWD on Bilibili**.
+
+## A note about "tested and passing"
+
+Because I do not have many devices to test with, anything in these documents marked
+"**tested and passing**" **may still fail to work on some devices or in some environments**.
+If that happens, please tell me through the contact above (Steam friend code 1054809675 /
+1UWD on Bilibili) and I will try to confirm and fix it.
 
 ## Two small anecdotes
 
