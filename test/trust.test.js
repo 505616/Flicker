@@ -33,7 +33,19 @@ const isWindows = process.platform === 'win32'
 //                 平台报告……）。证书生成从 2026-10 起是**纯 JS、全平台同一份代码**，
 //                 所以这些用例在 macOS / Linux 上也**必须真的跑**，
 //                 否则 CI 在那两个平台上等于没验证书这一块。
-const skipStore = isWindows ? false : '系统证书库的装卸目前仅在 Windows 上实现'
+/**
+ * 会真实改写**当前用户系统证书库**的用例，在两种情况下跳过：
+ *   ① 非 Windows：装卸目前只有 Windows 实现；
+ *   ② `FLICKER_NO_CERT_INSTALL=1`：CI 用的开关。
+ *
+ * ② 的理由是实测出来的：把根证书装进 CurrentUser\Root 会弹**系统确认框**，
+ * 真机上由用户点"是"，而 CI 上没人点 —— certutil 会一直等，第一次 CI 就挂了 25 分钟。
+ * 跳过时要**说清原因**，不能装作验过了（这条能力只在真机上有效验证）。
+ */
+const skipStore = !isWindows ? '系统证书库的装卸目前仅在 Windows 上实现'
+  : process.env.FLICKER_NO_CERT_INSTALL === '1'
+    ? 'CI 无法应答"安装根证书"的系统确认框（FLICKER_NO_CERT_INSTALL=1），这条只在真机上验'
+    : false
 
 let baseCount = 0
 let session = null
@@ -196,7 +208,7 @@ test('自检错误信息里必须包含"为什么"和"怎么修"', () => {
 
 // ── 信任库：装入 / 卸载 / 残留清理 ──────────────────────────
 
-test('CA 能装入信任库，且不需要管理员权限', { skipStore }, async () => {
+test('CA 能装入信任库，且不需要管理员权限', { skip: skipStore }, async () => {
   const before = await rootStoreCount()
   await trustCa(session.caDer, session.dir)
   const afterAdd = await rootStoreCount()
@@ -211,7 +223,7 @@ test('CA 能装入信任库，且不需要管理员权限', { skipStore }, async
   assert.equal(await rootStoreCount(), before, '卸载后应完全还原')
 })
 
-test('约束 2：cleanResidual 能清掉上次异常退出留下的证书', { skipStore }, async () => {
+test('约束 2：cleanResidual 能清掉上次异常退出留下的证书', { skip: skipStore }, async () => {
   // 先保证起点干净（即使前面的用例失败也不会互相拖累）
   await cleanResidual()
   const before = await rootStoreCount()
@@ -235,7 +247,7 @@ test('约束 2：cleanResidual 能清掉上次异常退出留下的证书', { sk
   assert.equal(await rootStoreCount(), before)
 })
 
-test('findResidualCa 只认自己的证书，不动别人的', { skipStore }, async () => {
+test('findResidualCa 只认自己的证书，不动别人的', { skip: skipStore }, async () => {
   await cleanResidual()
   const before = await rootStoreCount()
   const found = await findResidualCa()
@@ -243,7 +255,7 @@ test('findResidualCa 只认自己的证书，不动别人的', { skipStore }, as
   assert.equal(await rootStoreCount(), before, '查询不应改动证书库')
 })
 
-test('⭐ 上层工具污染 PSModulePath 时，证书库查询仍然可用', { skipStore }, async (t) => {
+test('⭐ 上层工具污染 PSModulePath 时，证书库查询仍然可用', { skip: skipStore }, async (t) => {
   // 这个用例复刻的是一次**真实故障**（2026-10）：
   // 从某些开发工具里启动时，继承来的 PSModulePath 里混进了 PowerShell 7 的
   // Security 模块、而且排在 5.1 自己的模块目录前面。于是 5.1 去加载一个

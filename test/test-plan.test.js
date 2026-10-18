@@ -67,11 +67,17 @@ test('真实的平台专属清单当前是空的且复核通过', () => {
 
 test('只在 Windows 上能做的用例是文件内自gate的，不是整个文件被跳过', () => {
   const src = readFileSync(path.join(ROOT, 'test/trust.test.js'), 'utf8')
-  assert.match(src, /const skipStore = isWindows \? false/,
+  // 2026-10：这个门多了第二种理由（`FLICKER_NO_CERT_INSTALL=1`，CI 上没人点
+  // "安装根证书"的系统确认框），所以断言只看"有 skipStore 这个门"，不钉死它的取值写法。
+  assert.match(src, /const skipStore = /,
     'test/trust.test.js 应当用一个明确的 skipStore 变量标注"这些用例要碰系统证书库"')
-  const gated = src.match(/\{ skipStore \}/g) ?? []
+  const gated = src.match(/\{ skip: skipStore \}/g) ?? []
   assert.ok(gated.length >= 3,
-    `应当至少有 3 个用例（装入/残留清理/只认自己的证书）挂在这个门上，实际 ${gated.length} 个`)
+    `应当至少有 3 个用例（装入/残留清理/只认自己的证书）挂在 skip: skipStore 上，实际 ${gated.length} 个`)
+  // 顺带钉住一个真犯过的错：写成 `{ skipStore }` 时 Node **不认识**这个键，
+  // 于是"跳过"根本没发生（2026-10 实测：传了环境变量仍然跑了 21 条）。
+  assert.doesNotMatch(src, /\{ skipStore \}/,
+    'Node 的测试选项是 `skip`，`{ skipStore }` 不会跳过任何东西')
 
   // 反过来：只依赖"生成一张证书"的用例**不该**被门挡住。
   // 证书生成是纯 JS、全平台同一份代码，挡住它们就是在白丢覆盖率。

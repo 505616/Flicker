@@ -178,6 +178,10 @@ child.on('exit', (code, signal) => {
  * 警告直指该改哪一行，成本最低。
  */
 function checkReadmeCounts(file) {
+  // CI 上会多几条"明确跳过"的用例（FLICKER_NO_CERT_INSTALL=1 → 证书库那 4 条），
+  // 数字天然与 README 对不上。这里不刷警告，否则每天都是一条假警报；
+  // 真机上仍然是"跑完就把数字对一遍"。
+  if (process.env.FLICKER_NO_CERT_INSTALL === '1') return
   let tap = ''
   try { tap = readFileSync(file, 'utf8') } catch { return }
   const num = (k) => Number((tap.match(new RegExp(`^# ${k} (\\d+)$`, 'm')) ?? [])[1])

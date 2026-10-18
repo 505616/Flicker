@@ -116,8 +116,17 @@ export async function runSend(opts) {
     const targetHost = ips[0] ?? ips6[0] ?? '127.0.0.1'
     ui.step(`准备证书（本机地址: ${[...ips, ...ips6].join(', ') || '仅回环'}）`)
 
+    // ⚠️ 环境变量与 `--no-cert-install` 等价，专供 CI 用。
+    //    原因很实在：把根证书装进"当前用户\Root"会弹出**系统确认框**，
+    //    真机上是用户点的（2026-10 用户确认："Windows 的证书安装之前都是我点的"），
+    //    而 CI 上没有人在，certutil 就会一直等下去 —— 第一次 CI 就是因此挂了 25 分钟。
+    //    所以 CI 用 `FLICKER_NO_CERT_INSTALL=1` 跳过这一步；这条能力在真机上照旧验。
+    const installCert = Boolean(opts.installCert) && process.env.FLICKER_NO_CERT_INSTALL !== '1'
+    if (process.env.FLICKER_NO_CERT_INSTALL === '1' && opts.installCert) {
+      ui.info('FLICKER_NO_CERT_INSTALL=1：本次不往系统信任库装证书（自动化场景；对方会看到一次"不安全"提示）')
+    }
     const certSupport = trust.support()
-    if (opts.installCert && !certSupport.supported) {
+    if (installCert && !certSupport.supported) {
       ui.warn(certSupport.detail)
       // 愿意自己动手的用户，给出确切命令。
       // 为什么打印而不是代跑：macOS 必然弹认证对话框、Linux 必然要装额外软件包 ——
@@ -128,7 +137,7 @@ export async function runSend(opts) {
         for (const line of hint) ui.info(`    ${line}`)
       }
     }
-    const willTrust = Boolean(opts.installCert && certSupport.supported)
+    const willTrust = Boolean(installCert && certSupport.supported)
 
     if (willTrust) {
       // 约束 2：先清掉上次异常退出留下的**所有**残留（Root + My + 临时目录）

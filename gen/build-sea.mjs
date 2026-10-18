@@ -251,28 +251,19 @@ try {
   log(' ', `${outName}  ${human(statSync(outPath).size)}`)
 
   /**
-   * macOS：签名这件事比看上去麻烦，2026-10 的 CI 先后踩了两次。
+   * macOS：注入前先去掉 Node 自带的签名（Node 的 SEA 文档明确要求这一步）。
+   * 注入后必须重新 ad-hoc 签名，否则内核对"签名与内容对不上"的 Mach-O **直接 SIGKILL**。
    *
-   * ① **注入前**先把 Node 自带的签名去掉 —— postject 要改 Mach-O 的载荷，带着有效签名去改，
-   *    得到的就是"签名与内容对不上"的文件，内核对它**直接 SIGKILL**。
-   * ② **注入后**必须重新签名（ad-hoc：`--sign -`，不需要证书、不需要联网），但**不能丢 entitlements**：
-   *    Node 的二进制带 `com.apple.security.cs.allow-jit` 等权限，V8 要靠 JIT 跑；
-   *    权限丢了在 arm64 + Hardened Runtime 下同样是"运行它没有任何输出、退出码 null（被信号杀掉）"。
-   *    所以先从**原 Node 二进制**里把 entitlements 取出来，重签时带回去。
-   * ③ 失败时把 `codesign -dv` 的输出一并打印 —— 那比"产物无法正常运行"有用得多。
+   * ⚠️ 2026-10 的 CI 在这条上连踩两次，都记下来免得重犯：
+   *   ① 只重签、**不传 `--macho-segment-name NODE_SEA`** → 注入进了错误的 Mach-O 段，
+   *      签名完全合法，但一跑就 **SIGSEGV**。Node 文档里"手动注入"那节写着：
+   *      Mach-O 必须把 blob 注入 `NODE_SEA` 段里名为 `NODE_SEA_BLOB` 的 section，
+   *      而这个段名只在 macOS 上需要显式给 postject。
+   *   ② 反过来，重签时**额外**加 `--options runtime`（Hardened Runtime）但 entitlements
+   *      没带全，会变成"签名有效、进程被 SIGKILL"。所以这里按 Node 文档来：只 `--sign -`，
+   *      不自作聪明加运行时加固。
    */
-  let macEntitlements = null
   if (process.platform === 'darwin') {
-    const dump = run('codesign', ['-d', '--entitlements', ':-', process.execPath])
-    if (/<plist/i.test(dump.out)) {
-      const start = dump.out.indexOf('<?xml')
-      const plist = start >= 0 ? dump.out.slice(start) : dump.out
-      macEntitlements = path.join(BUILD, 'entitlements.plist')
-      writeFileSync(macEntitlements, plist, 'utf8')
-      log(' ', '已从 Node 二进制里取出 entitlements（重签时带上，否则 V8 的 JIT 权限会丢）')
-    } else {
-      log(' ', '（Node 二进制里没有 entitlements，重签用 ad-hoc 默认值）')
-    }
     const stripped = run('codesign', ['--remove-signature', outPath])
     if (stripped.code !== 0) {
       log(' ', `（去掉 Node 原有签名失败，继续试：${stripped.out.trim().slice(0, 200)}）`)
@@ -284,10 +275,14 @@ try {
   // 用 gen/npx.mjs 走"当前 node + npx-cli.js"，不经 shell：
   // 原来 `spawnSync('npx', [...], {shell:true})` 会被 Node 24 打 DEP0190
   // （参数只拼接、不转义），而且路径里的空格/中文要过 cmd.exe 的引号规则。
-  const pj = runNpx(['--yes', 'postject@1.0.0-alpha.6',
+  // ⚠️ macOS 必须显式给 `--macho-segment-name NODE_SEA`：
+  //    Node 文档规定 Mach-O 的 blob 要放进 **`NODE_SEA` 段里的 `NODE_SEA_BLOB` section**；
+  //    不给这个参数，postject 会把它塞进别处 —— 签名照样合法，但一运行就 **SIGSEGV**。
+  const postjectArgs = ['--yes', 'postject@1.0.0-alpha.6',
     outPath, 'NODE_SEA_BLOB', blobPath,
-    '--sentinel-fuse', SENTINEL_FUSE],
-  { timeout: 300_000 })
+    '--sentinel-fuse', SENTINEL_FUSE]
+  if (process.platform === 'darwin') postjectArgs.push('--macho-segment-name', 'NODE_SEA')
+  const pj = runNpx(postjectArgs, { timeout: 300_000 })
   if (pj.code !== 0) {
     rmSync(outPath, { force: true })
     fail(`注入失败（可能需要网络下载 postject）:\n${pj.out.slice(0, 800)}`)
@@ -297,27 +292,18 @@ try {
   // ⑥ 自检：真的跑起来看看
   log('⑥', '自检产物…')
 
-  // ⚠️ macOS 必须先**重新做一次 ad-hoc 签名**才能跑（2026-10 CI 第一次跑抓到的）。
-  //    不是我们的代码有问题：postject 往 Mach-O 里注入 blob 会改掉原有签名，
-  //    而 macOS 内核对"签名与内容对不上"的可执行文件是**直接 SIGKILL** 的 ——
-  //    表现是"运行它没有任何输出、退出码 -9/137"，在 Windows / Linux 上完全看不出来。
-  //    Node 官方 SEA 文档也要求这一步；ad-hoc 签名（`--sign -`）不需要证书、不需要联网。
+  // ⚠️ macOS 必须**重新做一次 ad-hoc 签名**才能跑：注入改掉了 Mach-O 的内容，
+  //    而内核对"签名与内容对不上"的二进制是**直接 SIGKILL** 的。
+  //    按 Node 文档就用最朴素的 `codesign --sign -`（ad-hoc，不需要证书、不需要联网）。
+  //    **别加 `--options runtime`**：Hardened Runtime 会要求 entitlements 配齐，
+  //    配不齐就是"签名有效、进程被杀" —— 我们在这上面白花过一轮 CI。
   if (process.platform === 'darwin') {
-    // 重签时必须带上从 Node 二进制里取出的 entitlements（V8 的 JIT 权限在里面），
-    // 否则 arm64 + Hardened Runtime 下产物同样会被内核杀掉，而且**没有任何输出**。
-    // ⚠️ 刻意**不加** `--options runtime`：它会开启 Hardened Runtime，而 Node 的二进制里
-    //    entitlements 未必带着 V8 需要的 JIT 例外；开启后正是"签名有效但一跑就被杀"。
-    //    Node 官方 SEA 文档的做法是保留原 flags/requirements/entitlements，别额外加压。
-    const signArgs = ['--force', '--sign', '-', '--preserve-metadata=requirements,flags']
-    if (macEntitlements) signArgs.push('--entitlements', macEntitlements)
-    signArgs.push(outPath)
-    const resign = run('codesign', signArgs)
+    const resign = run('codesign', ['--force', '--sign', '-', outPath])
     if (resign.code !== 0) {
       fail(`ad-hoc 签名失败（少了它，产物会被内核直接杀掉）:\n${resign.out.slice(0, 800)}`)
     }
     const check = run('codesign', ['--verify', '--strict', '--verbose=2', outPath])
-    log(' ', `ad-hoc 签名完成（${check.code === 0 ? 'codesign --verify 通过' : 'verify 有告警'}，` +
-      '已带上 Node 的 entitlements）')
+    log(' ', `ad-hoc 签名完成（${check.code === 0 ? 'codesign --verify 通过' : 'verify 有告警'}）`)
   }
 
   const ver = run(outPath, ['--version'])

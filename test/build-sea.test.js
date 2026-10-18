@@ -64,8 +64,17 @@ test('⭐ 调 npx 不走 shell（Node 24 的 DEP0190 就是在说这件事）', 
     'build-sea.mjs 里不该再出现 shell:true —— 参数只拼接不转义，而且要过 cmd.exe 的引号规则')
   assert.match(BUILD_SRC, /import \{ runNpx \} from '\.\/npx\.mjs'/,
     '应当用 gen/npx.mjs 的 runNpx')
-  assert.match(BUILD_CODE, /runNpx\(\[/,
+  // ⚠️ 断言要盯**意图**（"注入走 runNpx、参数是数组"），不是盯字面量写法：
+  //    2026-10 把参数改成了先拼 `postjectArgs`（macOS 要多一个 `--macho-segment-name`），
+  //    原来写的 `/runNpx\(\[/` 就把一个本来正确的实现判成了错的。
+  assert.match(BUILD_CODE, /runNpx\(/,
     '注入那一步要走 runNpx')
+  // ⚠️ 这一条要看 **BUILD_SRC**（原始源码），不能看 BUILD_CODE（打包后的代码）：
+  //    打包器把资源类字符串字面量换成了 `''`，所以 `postject@…` 在 BUILD_CODE 里查不到。
+  assert.match(BUILD_SRC, /postject@1\.0\.0-alpha\.6/,
+    '仍然要调 postject（只是参数拼在数组里）')
+  assert.match(BUILD_SRC, /--macho-segment-name/,
+    'macOS 必须给 postject `--macho-segment-name NODE_SEA`，否则注入进错误的段、一跑就 SIGSEGV')
 })
 
 test('npx 的回退路径必须保留（否则某些安装方式就构建不了）', () => {
