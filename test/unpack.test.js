@@ -107,8 +107,6 @@ const hostile = [
   }, /超出文件末尾|截断/],
   ['路径穿越', () => pack([{ rel: '../escape.txt', data: 'x' }]), /路径不安全/],
   ['绝对路径', () => pack([{ rel: '/etc/passwd', data: 'x' }]), /路径不安全/],
-  ['Windows 保留名（本平台规则）', () => pack([{ rel: 'CON', data: 'x' }]),
-    process.platform === 'win32' ? /路径不安全/ : /（合法名字，不该被拒）/],
   ['两个条目落到同一个文件', () => pack([
     { rel: 'A.txt', data: '1' }, { rel: 'a.txt', data: '2' },
   ]), /同一个文件/],
@@ -119,11 +117,6 @@ const hostile = [
 for (const [name, make, want] of hostile) {
   test(`坏包必须被拒绝：${name}`, () => {
     const bytes = make()
-    if (name.includes('合法名字')) {
-      // 非 Windows 上 `CON` 就是普通文件名 —— 这里验的是"规则按平台生效"，不是"放过"
-      assert.equal(unpackArchive(bytes)[0].rel, 'CON')
-      return
-    }
     assert.throws(() => unpackArchive(bytes), (e) => {
       assert.ok(e instanceof UnpackError, `要是 UnpackError，实际 ${e?.name}`)
       assert.match(e.message, want)
@@ -131,6 +124,18 @@ for (const [name, make, want] of hostile) {
     })
   })
 }
+
+test('Windows 保留名：Windows 上拒绝、其它平台是合法文件名（规则按平台生效）', () => {
+  // ⚠️ 这一条踩过：把它塞进上面的"坏包表"里当"必须拒绝"的用例，
+  //    Linux / macOS 上 `CON` 就是普通文件名，于是 CI 在 ubuntu 与 macOS 上红了两条。
+  //    规则本身是按平台生效的（`src/path-safety.js` R8），判据要跟着平台走。
+  const bytes = pack([{ rel: 'CON', data: 'x' }])
+  if (process.platform === 'win32') {
+    assert.throws(() => unpackArchive(bytes), /路径不安全/)
+  } else {
+    assert.equal(unpackArchive(bytes)[0].rel, 'CON', '非 Windows 上它是合法名字')
+  }
+})
 
 test('非法 UTF-8 的文件名必须被拒绝（不能悄悄换成 U+FFFD）', () => {
   // 手工拼一个名字是非法 UTF-8 的条目：0xC3 单独出现不是合法序列
