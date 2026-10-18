@@ -40,6 +40,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { STRINGS } from '../web/i18n-strings.mjs'
+import { parseWorkflow } from '../_lab/rehearse-ci.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -74,6 +75,14 @@ export function collectFacts({ root = ROOT, includeArtifact = false } = {}) {
     const full = path.join(root, dir)
     return existsSync(full) ? readdirSync(full).filter((f) => f.endsWith('.md')).length : 0
   }
+  // CI 的步骤数：用预演脚本自己的解析器数（它读的就是 ci.yml）。
+  // 文件不存在时返回 null —— 判据自己的测试会用临时目录造一个没有 .github 的"仓库"，
+  // 那里不该凭空造一条事实出来（"CI 文件不存在"是 check-ci-parity 的活儿）。
+  const ciSteps = () => {
+    const f = path.join(root, '.github/workflows/ci.yml')
+    if (!existsSync(f)) return null
+    return String(parseWorkflow(readFileSync(f, 'utf8')).reduce((n, job) => n + job.steps.length, 0))
+  }
   const facts = [
     {
       id: 'i18n.count',
@@ -98,6 +107,16 @@ export function collectFacts({ root = ROOT, includeArtifact = false } = {}) {
         { file: '_lab/交接.md', re: /(\d+) 条判据/ },
       ],
     },
+    // 用预演脚本自己的解析器数：这样"CI 加了一步、交接里还写着旧数字"会当场红，
+    // 而不是等谁去数一遍（2026-10 就漂过一次：33 → 35）。
+    ...(ciSteps() === null ? [] : [{
+      id: 'ci.steps',
+      label: 'CI 的步骤数（两个 job 加起来，rehearse 脚本读的就是它）',
+      value: ciSteps(),
+      claims: [
+        { file: '_lab/交接.md', re: /把 (\d+) 个步骤按 CI 的顺序/ },
+      ],
+    }]),
     {
       id: 'docs.zh',
       label: '中文文档份数',
