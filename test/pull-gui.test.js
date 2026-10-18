@@ -115,7 +115,11 @@ function startGui() {
     const child = spawn(process.execPath, [CLI, '--gui'], {
       // `FLICKER_NO_OPEN` 也必须给：传完会弹资源管理器，而临时目录随后就被删了 ——
       // 那个窗口会变成用户桌面上的一张"位置不可用"错误框（用户实测到过）。
-      env: { ...process.env, FLICKER_NO_BROWSER: '1', FLICKER_NO_OPEN: '1' },
+      // ⚠️ `FLICKER_NO_NATIVE_PICK=1`：整套自动化里**一个系统窗口都不许弹**。
+      //    没有它，"点选择文件夹"会真的弹出 Windows 的文件夹对话框并卡在那儿等人点。
+      env: {
+        ...process.env, FLICKER_NO_BROWSER: '1', FLICKER_NO_OPEN: '1', FLICKER_NO_NATIVE_PICK: '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     })
     live.push(child)
@@ -374,4 +378,77 @@ test('页面：入口、面板元素、接线、文案（中英各一份）都�
   const zhKeys = Object.keys(STRINGS.zh).filter((k) => k.startsWith('pullui.'))
   const enKeys = Object.keys(STRINGS.en).filter((k) => k.startsWith('pullui.'))
   assert.deepEqual(enKeys.sort(), zhKeys.sort(), '中英文的 pullui.* 必须一一对应')
+})
+
+// ── ⑤ 2026-10 用户反馈的三件事（返回、目录文案、原生对话框）──────────
+
+test('「返回」在面板**最上面**（用户：点进来之后没法退回上一个页面）', { timeout: 60000 }, async () => {
+  const html = await readFile(path.join(ROOT, 'web', 'station.html'), 'utf8')
+  const edit = html.slice(html.indexOf('id="pullEdit"'), html.indexOf('id="pullConfirm"'))
+  const confirm = html.slice(html.indexOf('id="pullConfirm"'), html.indexOf('id="pullLive"'))
+  // 两个子视图都要有返回，而且都在自己那块的**开头**（第一个按钮）
+  for (const [name, block] of [['填链接那屏', edit], ['核对指纹那屏', confirm]]) {
+    const back = block.indexOf('data-i18n="pullui.back"')
+    const firstInput = block.search(/<input|id="pullFp"/)
+    assert.ok(back > 0, `${name}必须有一个「返回」按钮`)
+    assert.ok(firstInput < 0 || back < firstInput, `${name}的「返回」要排在输入框/指纹**前面**（否则窗口矮一点就看不见）`)
+  }
+})
+
+test('「选择文件夹」走系统对话框；退回自带选择器时文案也必须对（不是"就发这些"）', { timeout: 60000 }, async () => {
+  const html = await readFile(path.join(ROOT, 'web', 'station.html'), 'utf8')
+
+  // ① 先试原生：两个入口都调 pickSaveDir（顺序：先系统对话框，再自带选择器）
+  assert.match(html, /async function pickSaveDir\(/, '要有 pickSaveDir()')
+  assert.match(html, /await api\('pickdir'/, '要真的去请求原生对话框')
+  assert.match(html, /openSaveDirPicker\(/, '拿不到原生对话框时要退回自带选择器')
+
+  // ② 自带选择器有独立的"选保存目录"模式：单选、文案用各自的（pullui / recvui）
+  assert.match(html, /browseMode = 'saveDir'/, "要有 'saveDir' 模式")
+  assert.match(html, /input: 'pullDir', titleKey: 'pullui\.dirPickTitle', okKey: 'pullui\.dirPickOk'/)
+  assert.match(html, /input: 'recvDir', titleKey: 'recvui\.dirPickTitle', okKey: 'recvui\.dirPickOk'/)
+  assert.match(html, /t\(browseSave\.okKey\)/, '按钮文案要来自当前模式的 key')
+
+  // ③ 单选：saveDir 下选一个要把别的勾去掉
+  assert.match(html, /if \(on && browseSave\)[\s\S]{0,200}browseSel\.clear\(\)/, '选保存目录时必须是单选')
+
+  // ④ 新建文件夹（用户点名要的）
+  assert.match(html, /id="browseNew"[^>]*data-i18n="send\.browse\.newDir"/)
+  assert.match(html, /await api\('mkdir'/, '新建文件夹要真去建')
+  assert.match(html, /send\.browse\.hintSave/, '退回选择器时要有专门的提示文案（不能借用"选要发的东西"那句）')
+
+  // ⑤ 旧写法必须真的没了（那个布尔就是文案串味的根源）
+  assert.ok(!/browseForRecvDir/.test(html.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')),
+    '`browseForRecvDir` 这种"一个布尔打天下"的写法要删干净')
+})
+
+test('接口：原生对话框被关掉时明说 disabled（自动化里绝不弹窗）', { timeout: 90000 }, async () => {
+  const { api } = await bootGui()
+  const r = await api('pickdir', { title: '存到哪', startDir: '' })
+  assert.equal(r.json?.ok, false)
+  assert.equal(r.json.reason, 'disabled', '`FLICKER_NO_NATIVE_PICK=1` 下应当报 disabled，让页面退回自带选择器')
+})
+
+test('接口：新建文件夹真的建得出来；名字里带分隔符/越权一律拒绝', { timeout: 90000 }, async () => {
+  const work = await tempDir('pull-gui-mkdir')
+  const { api } = await bootGui()
+
+  const ok = await api('mkdir', { parent: work, name: '新建文件夹' })
+  assert.equal(ok.json?.ok, true, `应当建成：${ok.text}`)
+  await readdir(work).then((n) => assert.deepEqual(n, ['新建文件夹']))
+
+  // 再建一次：算是成功（文件夹本来就在），但要说清是"已存在"
+  const again = await api('mkdir', { parent: work, name: '新建文件夹' })
+  assert.equal(again.json?.ok, true)
+  assert.equal(again.json.existed, true)
+
+  for (const bad of ['../escape', 'a/b', 'a\b', '.', '..', '']) {
+    const r = await api('mkdir', { parent: work, name: bad })
+    assert.equal(r.json?.ok, false, `「${bad}」应当被拒绝`)
+  }
+  // 父目录必须是绝对路径（否则就成了"相对当前工作目录"的写盘入口）
+  const rel = await api('mkdir', { parent: 'relative/dir', name: 'x' })
+  assert.equal(rel.json?.ok, false)
+  const outside = await readdir(path.join(work, '..'))
+  assert.ok(!outside.includes('escape'), '越权那一笔不能真的建出来')
 })

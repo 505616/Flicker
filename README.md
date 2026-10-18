@@ -103,7 +103,7 @@ Give up any one of those four, and something else is probably less trouble.
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
 > Cross-network (relay) is **implemented and verified against a real relay**.
 
-**Tests: 662 cases — 658 pass, 0 fail, 4 skipped.** Each skip says why: three need a working
+**Tests: 684 cases — 680 pass, 0 fail, 4 skipped.** Each skip says why: three need a working
 **git** (they guard *repository metadata* such as "are the launch scripts executable in git?" ——
 they are skipped where git is not on PATH, e.g. this machine's PowerShell, and do run in CI), and one
 needs a symlink (creating one on Windows requires developer mode or admin rights — an environment

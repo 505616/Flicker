@@ -370,8 +370,16 @@ test('⭐ 图形界面：选文件支持多选，且选择能跨目录累积', {
     '▸ 按钮点击要进目录')
 
   // ⑤ 双击仍然直接发这一个（保留快路径）
-  assert.match(loadFn, /dblclick[\s\S]{0,120}addPathsFrom\(\[e\.path\]\)/,
-    '双击应当直接发这一个 —— 只加一个文件时不该被迫"选中再确认"')
+  //
+  // ⚠️ 这里断言两条，而不是一条宽松的正则：
+  //    2026-10 加上"选保存目录"模式之后，双击的第一支是"进这一层"
+  //    （和系统对话框一致，且**绝不能**把目录加进发送清单），
+  //    `addPathsFrom` 因此退到第二支。原来的 `/dblclick[\s\S]{0,120}addPathsFrom/`
+  //    直接被那段新代码挤爆了 —— 红得对，但那说明断言写的是**写法**而不是**行为**。
+  assert.match(loadFn, /dblclick[\s\S]{0,200}if \(browseSave\) \{ await loadBrowse\(e\.path\); return; \}/,
+    '选保存目录时，双击应当是"进这一层"，绝不能把目录加进发送清单')
+  assert.match(loadFn, /dblclick[\s\S]{0,400}addPathsFrom\(\[e\.path\]\)/,
+    '双击仍然要能直接发这一个 —— 只加一个文件时不该被迫"选中再确认"')
 
   // ⑥ 确认按钮要显示选了几个
   assert.match(html, /t\('send\.browse\.pickFiles', \{ n \}\)/, '按钮文案要带选中的数量')

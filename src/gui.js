@@ -38,6 +38,7 @@ import { cleanAllLeftovers, cleanTempDirs } from './trust.js'
 import { runSend } from './run.js'
 import { startReceiveService, defaultSaveDir, waitForReceive } from './recv.js'
 import { matchFingerprint, parseRecvLink, probePeer, pullFromLink } from './pull.js'
+import { pickFolder } from './native-pick.js'
 import { dedupePath } from './manifest.js'
 import { compareKeyOf } from './path-safety.js'
 import { BROWSER_QR_SOURCE } from './tty.js'
@@ -413,6 +414,8 @@ export async function runGui(opts = {}) {
           case '/api/pull/start': json(await startPull(body)); return
           case '/api/pull/stop': json(await stopPull()); return
           case '/api/pull/open': json(await openPullDir()); return
+          case '/api/pickdir': json(await pickSaveFolder(body)); return
+          case '/api/mkdir': json(await makeDir(body)); return
           default: json({ error: '没有这个接口' }, 404); return
         }
       }
@@ -919,6 +922,50 @@ export async function runGui(opts = {}) {
   //   · 对方用的是**自签证书**，CA 只装在他那台机器上，浏览器不会为 XHR 给"继续前往"。
   //   把取文件这件事交给同一个进程里的 `pullFromLink()`，两个问题一起消失：
   //   它本来就是 `flicker recv <链接>` 那条命令的实现。证书那一关改成"人核对指纹"。
+
+  /**
+   * 弹系统自带的「选择文件夹」对话框（Windows: FolderBrowserDialog / macOS: choose folder /
+   * Linux: zenity）。拿不到就**明说**原因，让页面退回自带的那个选择器 ——
+   * 不要静默失败（用户会以为按钮坏了）。
+   *
+   * 2026-10 用户提的原话："不能新建文件夹，要不还是用原生的对话框吧"。
+   * 页面自带的选择器是给"挑要发的东西"写的，用在"挑保存目录"上处处别扭；
+   * 系统对话框有「新建文件夹」、也记得上次去的地方。
+   */
+  async function pickSaveFolder(body = {}) {
+    const title = String(body.title ?? '').trim()
+    const startDir = String(body.startDir ?? '').trim() || defaultSaveDir()
+    const r = await pickFolder({ title, startDir })
+    if (r.ok) log(`  · 保存文件夹：${r.path}`)
+    else if (r.reason === 'unsupported') log('  · 这台机器没有可用的系统文件夹对话框，改用它自带的选择器')
+    return r
+  }
+
+  /**
+   * 建一个目录（自带选择器的「新建文件夹」用它）。
+   *
+   * 只允许在**已存在的绝对路径**下建一层，名字里不许有路径分隔符与 Windows 保留字符 ——
+   * 这个接口的用途只有"给用户建一个存文件的文件夹"，不该变成一个通用的写盘入口。
+   */
+  async function makeDir(body = {}) {
+    const { mkdir } = await import('node:fs/promises')
+    const parent = String(body.parent ?? '').trim()
+    const name = String(body.name ?? '').trim()
+    if (!parent || !path.isAbsolute(parent)) return { ok: false, error: '需要一个绝对路径的父目录' }
+    if (!name) return { ok: false, error: '文件夹名不能为空' }
+    if (name === '.' || name === '..' || /[\\/:*?"<>|]/.test(name)) {
+      return { ok: false, error: '这个名字里含路径分隔符或系统不允许的字符' }
+    }
+    const full = path.join(parent, name)
+    try {
+      await mkdir(full)
+    } catch (e) {
+      if (e?.code === 'EEXIST') return { ok: true, path: full, existed: true }
+      return { ok: false, error: e?.message ?? String(e) }
+    }
+    log(`  · 新建文件夹：${full}`)
+    return { ok: true, path: full }
+  }
 
   /** 只探测：解析链接、连一次、把证书指纹算出来给界面显示（不传任何数据） */
   async function probePullLink(link) {
