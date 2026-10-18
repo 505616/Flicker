@@ -32,9 +32,11 @@ import {
 // ── ① 命令拼得对 ─────────────────────────────────────────────
 
 test('Windows：用 System32 里的 PowerShell 5.1 + -STA（FolderBrowserDialog 是 COM，MTA 下会抛）', () => {
+  // ⚠️ 注入 `exists: () => true`：这条验的是**命令拼法**，不该因为"宿主是 Linux、
+  //    没有 C:\Windows\...\powershell.exe"而红（CI 上就是这么红的）。
   const c = buildPickCommand({
     platform: 'win32', title: '选择存到哪个文件夹', startDir: 'D:\\闪传',
-    env: { ...process.env, SystemRoot: 'C:\\Windows' },
+    env: { ...process.env, SystemRoot: 'C:\\Windows' }, exists: () => true,
   })
   assert.ok(c, 'Windows 上应当给出命令（这台机器有 System32\\WindowsPowerShell）')
   assert.match(c.cmd, /powershell\.exe$/i)
@@ -83,7 +85,9 @@ test('标题里带引号也不能把脚本拼坏（单引号/双引号两种方�
   assert.equal(psQuote("a'b"), "'a''b'")
   assert.equal(asQuote('a"b'), '"a\\"b"')
   assert.equal(asQuote('a\\b'), '"a\\\\b"')
-  const win = buildPickCommand({ platform: 'win32', title: "it's", env: { ...process.env, SystemRoot: 'C:\\Windows' } })
+  const win = buildPickCommand({
+    platform: 'win32', title: "it's", env: { ...process.env, SystemRoot: 'C:\\Windows' }, exists: () => true,
+  })
   assert.match(win.args[win.args.length - 1], /Description = 'it''s'/)
   const mac = buildPickCommand({ platform: 'darwin', title: 'say "hi"' })
   assert.match(mac.args[mac.args.length - 1], /prompt "say \\"hi\\""/)

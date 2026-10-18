@@ -442,7 +442,9 @@ test('接口：新建文件夹真的建得出来；名字里带分隔符/越权�
   assert.equal(again.json?.ok, true)
   assert.equal(again.json.existed, true)
 
-  for (const bad of ['../escape', 'a/b', 'a\b', '.', '..', '']) {
+  // ⚠️ 别在这里写 `'a\b'`：JS 里那是**退格符**（0x08），在 Linux 上还是个合法文件名，
+  //    于是"应当被拒绝"会变成"真的建出来了"（CI 上就是这么红的）。控制字符单独写。
+  for (const bad of ['../escape', 'a/b', '/abs', '.', '..', '', 'a\u0000b', 'a\u0008b']) {
     const r = await api('mkdir', { parent: work, name: bad })
     assert.equal(r.json?.ok, false, `「${bad}」应当被拒绝`)
   }

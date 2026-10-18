@@ -953,10 +953,18 @@ export async function runGui(opts = {}) {
     const name = String(body.name ?? '').trim()
     if (!parent || !path.isAbsolute(parent)) return { ok: false, error: '需要一个绝对路径的父目录' }
     if (!name) return { ok: false, error: '文件夹名不能为空' }
-    if (name === '.' || name === '..' || /[\\/:*?"<>|]/.test(name)) {
-      return { ok: false, error: '这个名字里含路径分隔符或系统不允许的字符' }
+    // ⚠️ 控制字符也要挡：JS 里 `'a\b'` 是**退格符**（0x08），不是"a 反斜杠 b" ——
+    //    在 Linux 上它还是个合法文件名，于是真能建出一个名字里有退格符的文件夹。
+    //    人在界面上不会想建这种名字，一律拒绝。
+    if (name === '.' || name === '..' || /[\\/:*?"<>|\u0000-\u001f]/.test(name)) {
+      return { ok: false, error: '这个名字里含路径分隔符、控制字符或系统不允许的字符' }
     }
     const full = path.join(parent, name)
+    // 只允许"在 parent **里面**建一层"：`../escape`、`/abs` 这类一旦放过去，
+    // 这个接口就成了"任意位置写目录"的入口（名字里没分隔符也能靠 `..` 逃出去）。
+    if (path.dirname(path.resolve(full)) !== path.resolve(parent)) {
+      return { ok: false, error: '不能建到上一级目录之外' }
+    }
     try {
       await mkdir(full)
     } catch (e) {
