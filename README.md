@@ -287,7 +287,7 @@ npm run release       # arrange it into a publishable shape → dist/release/
 
 `npm run release` produces `SHA256SUMS` and `RELEASE.md` (download table, usage,
 **known limitations**, checksums) and prints a ready-to-copy `gh release create` command.
-It also pairs every artifact with a **zip** (94.4 MB → 36.0 MB, **62% smaller**): 89.2 MB of the
+It also pairs every artifact with a **zip** (94.5 MB → 36.1 MB, **62% smaller**): 89.2 MB of the
 artifact is the Node runtime and cannot be removed, so what we compress is the *download*, not the size.
 The ZIP writer is our own, zero-dependency one (`gen/zip.mjs`).
 
