@@ -118,6 +118,12 @@ jobs:
       - name: 文档里的命令行参数程序都认
         run: node gen/check-doc-flags.mjs
 
+      # 文档里那些"会随时间变化的数字"（i18n 条数、文档份数、判据条数、
+      # 示例里的版本号、Node 最低版本…）必须与源码算出来的一致。
+      # 2026-10 用户要求"查文档错误"时一次揪出四类过期数字，而当时**没有任何机器盯着**。
+      - name: 文档里的数字与实现一致
+        run: node gen/check-doc-numbers.mjs
+
       # 我们建的临时目录前缀必须登记在册（gen/tmp.mjs 的 PREFIXES）——
       # 否则事后没有任何东西能安全地认领它们，只能攒在用户的 %TEMP% 里
       # （2026-10 实测攒到 2.8 GB / 6717 个文件才被发现）。
@@ -200,6 +206,11 @@ jobs:
       - name: 验证产物真的能跑
         timeout-minutes: 15
         run: node gen/smoke-sea.mjs
+
+      # 产物大小也是文档里的一个"会过期的数字"。只有 Windows 那个产物与文档里写的
+      # 数字对应（其它平台大小不同），所以脚本在非 Windows 上会打印"跳过"。
+      - name: 文档里写的产物体积与真实产物一致
+        run: node gen/check-doc-numbers.mjs --artifact
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
