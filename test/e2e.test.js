@@ -263,7 +263,26 @@ async function boot(args, workDir) {
 
 // ── 用例 ────────────────────────────────────────────────────
 
+/**
+ * 共享 CI runner 上偶尔会碰到 `socket hang up`（发送端进程在握手/取块期间没了）。
+ * 这是**传输层**的偶发，不是限速逻辑的问题；重跑一次即可，而且重跑不放松任何断言
+ * （时间窗口、逐字节哈希、块数都照旧）。2026-10 的 Windows runner 上出现过一次。
+ */
+async function withTransportRetry(fn, { attempts = 2 } = {}) {
+  let last
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn() } catch (e) {
+      last = e
+      const transient = /socket hang up|ECONNRESET|ECONNREFUSED|EPIPE/i.test(String(e?.message ?? e))
+      if (!transient || i === attempts - 1) throw e
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+  }
+  throw last
+}
+
 test('⭐ 限速真的接到传输路径上了（不只是解析参数）', { timeout: 180000 }, async () => {
+  await withTransportRetry(async () => {
   // 单元测试能证明"限速器算得对"，但证明不了"它接在传输路径上"。
   //
   // ⚠️ 文件必须**大于一块**。第一块会用到桶里的初始额度
@@ -318,6 +337,7 @@ test('⭐ 限速真的接到传输路径上了（不只是解析参数）', { ti
   assert.ok(fetchMs <= 8000,
     `限速不该慢到这个程度（实际 ${fetchMs}ms）—— 可能限得太死或死锁了`)
   void tBoot
+  })
 })
 
 test('端到端：真实传输并逐字节校验（含多种文件形态）', { timeout: 180000 }, async () => {
