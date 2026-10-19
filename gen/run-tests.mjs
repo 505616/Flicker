@@ -17,7 +17,7 @@
  * 额外参数会原样透传给 `node --test`。
  */
 import { spawn } from 'node:child_process'
-import { readdirSync, readFileSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -178,40 +178,53 @@ child.on('exit', (code, signal) => {
  * 警告直指该改哪一行，成本最低。
  */
 function checkReadmeCounts(file) {
-  // CI 上会多几条"明确跳过"的用例（FLICKER_NO_CERT_INSTALL=1 → 证书库那 4 条），
-  // 数字天然与 README 对不上。这里不刷警告，否则每天都是一条假警报；
-  // 真机上仍然是"跑完就把数字对一遍"。
-  if (process.env.FLICKER_NO_CERT_INSTALL === '1') return
+  // 这里**不再**因为 `FLICKER_NO_CERT_INSTALL=1` 早退：跳过改变"通过数"，但**不改**
+  // 用例总数与失败数，而这两项正是本判据唯一在比的东西 —— CI 上照样得成立。
   let tap = ''
   try { tap = readFileSync(file, 'utf8') } catch { return }
   const num = (k) => Number((tap.match(new RegExp(`^# ${k} (\\d+)$`, 'm')) ?? [])[1])
-  const tests = num('tests'), pass = num('pass'), fail = num('fail'), skipped = num('skipped')
+  const tests = num('tests'), fail = num('fail')
   if (!Number.isFinite(tests)) return       // 没拿到数字（reporter 变了）就安静跳过
 
+  // ⚠️ 只比 **用例总数** 与 **失败数**。跳过的条数是**环境属性**（有没有 git、能不能建
+  //    符号链接、有没有 IPv6 回环、证书库要不要人点确认框……），同一份代码在不同机器上
+  //    取值不同：2026-10 实测本机 1 条、CI 上 5 条、开 `FLICKER_NO_CERT_INSTALL=1`
+  //    时 8 条。把它写进 README 就等于写了一个必然过期的数字，所以文档里只写"随机器
+  //    能力变化，跑完会打印"，这里也就没有跳过数可比。
   const targets = [
-    // ⚠️ 中文版叫 `读我.md`（用户要求：中文 README 改名、英文的去掉 `.en`，
-    //    两份都放根目录），英文版就叫 `README.md`。
-    ['读我.md', /(\*\*测试现状：)(\d+) 个用例，(\d+) 通过、(\d+) 失败、(\d+) 跳过/,
-      `**测试现状：${tests} 个用例，${pass} 通过、${fail} 失败、${skipped} 跳过`],
-    ['README.md', /(\*\*Tests: )(\d+) cases — (\d+) pass, (\d+) fail, (\d+) skipped/,
-      `**Tests: ${tests} cases — ${pass} pass, ${fail} fail, ${skipped} skipped`],
+    // 中文版叫 `读我.md`（用户要求：中文 README 改名、英文的去掉 `.en`，两份都放根目录）
+    ['读我.md', /\*\*测试现状：(\d+) 个用例，(\d+) 失败/],
+    ['README.md', /\*\*Tests: (\d+) cases, (\d+) failures?/],
   ]
 
-  const stale = []
-  for (const [f, re, wanted] of targets) {
-    const src = readFileSync(path.join(ROOT, f), 'utf8')
+  // 对不上就**直接写回去**（而不是只警告）。理由：
+  //   · 现在只剩"用例总数"和"失败数"两个数，值来自刚跑完的 TAP，不是猜的；
+  //   · 只警告的话，实际结果是 —— 数字过期了但没人读那行提醒（2026-10 就这样：
+  //     文档写 721 通过 / 4 跳过，实测 724 通过 / 1 跳过，好几天没人发现）；
+  //   · 写回去的 diff 会在 `git status` 里露出来，比一句黄字显眼。
+  const changed = []
+  const missing = []
+  for (const [f, re] of targets) {
+    const full = path.join(ROOT, f)
+    const src = readFileSync(full, 'utf8')
     const m = src.match(re)
-    if (!m) { stale.push(`  ${f}：找不到测试数量那一行（是不是改过写法？）`); continue }
-    const got = [Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])]
-    if (got[0] !== tests || got[1] !== pass || got[2] !== fail || got[3] !== skipped) {
-      stale.push(`  ${f}：写着 ${got.join('/')}，实际是 ${[tests, pass, fail, skipped].join('/')}\n` +
-        `    应改成：${wanted}`)
-    }
+    if (!m) { missing.push(f); continue }
+    if (Number(m[1]) === tests && Number(m[2]) === fail) continue
+    const bits = []
+    if (Number(m[1]) !== tests) bits.push(`用例总数 ${m[1]} → ${tests}`)
+    if (Number(m[2]) !== fail) bits.push(`失败数 ${m[2]} → ${fail}`)
+    const fixed = src.replace(re, (whole, a, b) => whole.replace(a, tests).replace(b, fail))
+    writeFileSync(full, fixed, 'utf8')
+    changed.push(`${f}：${bits.join('、')}`)
   }
 
-  if (stale.length) {
-    console.log('\n⚠️  文档里的测试数量和这次运行对不上：')
-    for (const s of stale) console.log(s)
-    console.log('   （只是提醒，不影响测试结果）')
+  if (missing.length) {
+    console.log(`\n⚠️  这几份 README 里找不到"测试现状"那一行（是不是改过写法？）：${missing.join(', ')}`)
+    console.log('   （只是提醒，不影响测试结果 —— 但 npm run check 里的 check-doc-numbers 会失败）')
+  }
+  if (changed.length) {
+    console.log('\n✓ 已把这次跑出来的数字写回 README：')
+    for (const c of changed) console.log(`   ${c}`)
+    console.log('   （这些改动记得一起提交；跳过条数刻意不写进文档，它随机器能力变化）')
   }
 }

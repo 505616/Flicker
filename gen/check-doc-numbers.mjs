@@ -271,6 +271,85 @@ export function sameNumber(claimed, expected, tolerance) {
   return c === e
 }
 
+/**
+ * README 里那句"测试现状"：**只许钉用例总数与失败数，不许钉跳过条数**。
+ * -------------------------------------------------------------
+ * 这是 2026-10 复查文档时抓到的一条真错误：两份 README 都写着
+ * `725 个用例，721 通过、0 失败、4 跳过`，还额外解释"在 macOS / Linux 上另有
+ * 4 个**文件**整体跳过"。实测下来两处都不成立：
+ *   · 跳过条数是**环境属性** —— 同一台机器换一种跑法就从 4 变 1（能不能建符号链接、
+ *     PATH 里有没有 git、有没有 IPv6 回环、CI 上证书库要不要人点确认框）；
+ *   · `gen/test-plan.mjs` 里的 `WINDOWS_ONLY` 是**空的**，没有任何测试文件按平台整体
+ *     跳过（`test-plan.test.js` 就是在守这一点）。
+ * 数字写死之后没人会去每台机器各跑一遍验证，于是它就一直是错的。所以这条判据的做法是：
+ *   ① 找到那句话（找不到 = 失败 —— 句子被删掉之后判据就悄悄失效了）；
+ *   ② 失败数必须是 0；
+ *   ③ 那句话里**不许**出现"N 跳过 / N skipped"这种钉死的统计。
+ * 跳过原因该怎么写，文档里已经改成"随机器能力变化 + 逐条列原因"的写法。
+ */
+export function checkTestStatus({ read }) {
+  const problems = []
+  // anchor 只负责"找到那句话"，re 负责"它的形状对不对" —— 分开是有意的：
+  // 旧写法（721 通过、4 跳过）连形状都变了，如果只有一条正则，报出来的会是
+  // "找不到那一行"，把真正的问题（写死了跳过条数）盖住。
+  const rules = [
+    {
+      file: '读我.md',
+      anchor: /测试现状：/,
+      re: /\*\*测试现状：(\d+) 个用例，(\d+) 失败/,
+      shape: '**测试现状：725 个用例，0 失败。**',
+    },
+    {
+      file: 'README.md',
+      anchor: /^\*\*Tests: /,
+      re: /\*\*Tests: (\d+) cases, (\d+) failures?/,
+      shape: '**Tests: 725 cases, 0 failures.**',
+    },
+  ]
+  // "钉死跳过条数"的两种写法：`4 跳过`、`4 条跳过`、`4 skipped`
+  const PINNED_SKIPS = /(\d+\s*条?\s*跳过|\d+\s*skipped)/i
+  const EXPECT_SHAPE = '只写用例总数与失败数（形如 ' + '**测试现状：725 个用例，0 失败。**），跳过条数与环境有关、不许写死'
+  for (const { file, anchor, re, shape } of rules) {
+    const src = read(file)
+    if (src === null) {
+      problems.push({ fact: 'testStatus', file, note: '文件不存在' })
+      continue
+    }
+    const lines = src.split('\n')
+    const idx = lines.findIndex((l) => anchor.test(l))
+    if (idx < 0) {
+      problems.push({
+        fact: 'testStatus', file,
+        note: `找不到"测试现状"那一行（找的是 ${anchor}）—— 句子被改掉/删掉之后这条判据就失效了`,
+      })
+      continue
+    }
+    const line = lines[idx]
+    const m = line.match(re)
+    if (!m) {
+      problems.push({
+        fact: 'testStatus', file, line: idx + 1,
+        claim: line.slice(0, 80), expected: `${EXPECT_SHAPE}（例如 ${shape}）`,
+      })
+      continue
+    }
+    if (m[2] !== '0') {
+      problems.push({
+        fact: 'testStatus', file, line: idx + 1,
+        claim: `失败数写成 ${m[2]}`, expected: '0 失败（有失败就该修测试，而不是改文档）',
+      })
+    }
+    if (PINNED_SKIPS.test(line)) {
+      problems.push({
+        fact: 'testStatus', file, line: idx + 1,
+        claim: line.slice(0, 80),
+        expected: '不要写死跳过条数（它随机器能力变化）—— 只写用例总数与失败数，跳过原因逐条列',
+      })
+    }
+  }
+  return { problems }
+}
+
 // ── CLI ──────────────────────────────────────────────────────
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
@@ -290,6 +369,8 @@ if (isMain) {
   }
 
   const { problems, checked, hits } = checkFacts({ facts, read })
+  const status = checkTestStatus({ read })
+  problems.push(...status.problems)
 
   for (const fact of facts) {
     const n = fact.claims.length
@@ -306,5 +387,6 @@ if (isMain) {
       '如果是句子被改掉了，请把那个句式补回去（这条判据靠它定位）。')
     process.exit(1)
   }
+  console.log(`✓ 测试现状那一行：只钉用例总数与失败数，没有写死跳过条数`)
   console.log(`\n✓ 文档里的数字与实现一致（${checked} 条事实 / ${hits} 处声明）`)
 }

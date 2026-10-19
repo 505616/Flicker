@@ -103,14 +103,23 @@ Give up any one of those four, and something else is probably less trouble.
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
 > Cross-network (relay) is **implemented and verified against a real relay**.
 
-**Tests: 725 cases — 721 pass, 0 fail, 4 skipped.** Each skip says why: three need a working
-**git** (they guard *repository metadata* such as "are the launch scripts executable in git?" ——
-they are skipped where git is not on PATH, e.g. this machine's PowerShell, and do run in CI), and one
-needs a symlink (creating one on Windows requires developer mode or admin rights — an environment
-limitation, not a missing feature). On macOS / Linux a further four test *files* are
-skipped, because installing the CA into the **system trust store** is Windows-only so far
-(see [`docs/路线图.md`](docs/路线图.md)).
-Every run asserts that the user's certificate stores are restored to their pre-run state.
+**Tests: 730 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
+deliberately **not** pinned here — every skipped case prints its own reason when the suite runs
+(this run: 1 locally, 5 in CI):
+
+- **4 cases** install/remove the CA in the user's trust store and only run on a real Windows box. CI
+  sets `FLICKER_NO_CERT_INSTALL=1` (nobody can click the system "install root certificate" prompt), and
+  macOS / Linux do not have that capability implemented yet, so they skip there too.
+- **1 case** needs to be able to create a **symlink** (on Windows: developer mode or admin rights).
+- **3 cases** need a **working git** on the machine (they guard *repository metadata* such as "are the
+  launch scripts executable in git?").
+- **3 cases** need an **IPv6 loopback** on this machine, and **1 case** needs the local npm layout to be
+  one the build recognises.
+
+No test *file* is skipped by platform: when a condition is missing the cases skip **individually**,
+each with its reason (see `gen/test-plan.mjs` and `skipStore` in `test/trust.test.js`).
+The trust-store cases assert on every run that the user's certificate stores are restored to their
+pre-run state.
 
 ```powershell
 npm test                # full suite (serial; most stable)

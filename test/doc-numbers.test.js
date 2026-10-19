@@ -18,7 +18,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  checkFacts, collectFacts, makeReader, sameNumber,
+  checkFacts, checkTestStatus, collectFacts, makeReader, sameNumber,
 } from '../gen/check-doc-numbers.mjs'
 import { STRINGS } from '../web/i18n-strings.mjs'
 
@@ -148,4 +148,55 @@ test('--artifact：真产物比文档大/小超过 0.1 MB 时必须红（用临�
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ── "测试现状"那一行：只许钉用例总数与失败数，不许钉跳过条数 ────────────
+//
+// 2026-10 复查时这两份 README 都写着 `721 通过、0 失败、4 跳过`，而同一台机器
+// 换个跑法实测就是 1 条跳过 —— 跳过条数是环境属性，写死必然过期。下面四条把
+// "它能抓出旧写法"和"它不会误伤正确写法"两件事都钉住。
+
+const statusDoc = (zh, en) => (rel) => ({
+  '读我.md': zh,
+  'README.md': en,
+}[rel] ?? null)
+
+test('测试现状那一行：现在两份 README 都合规（且确实被读到）', () => {
+  const r = checkTestStatus({ read: makeReader(ROOT) })
+  assert.deepEqual(r.problems, [], '两份 README 的测试现状应当只写用例总数与失败数：\n' +
+    r.problems.map((p) => `${p.file}:${p.line ?? '?'} ${p.note ?? p.claim}`).join('\n'))
+})
+
+test('测试现状那一行：写死"N 跳过"必须被抓出来（就是这次修掉的旧写法）', () => {
+  const read = statusDoc(
+    '**测试现状：725 个用例，721 通过、0 失败、4 跳过。**',
+    '**Tests: 725 cases — 721 pass, 0 fail, 4 skipped.**')
+  const p = checkTestStatus({ read }).problems
+  assert.equal(p.length, 2, '中英两份都要报，实际：' + JSON.stringify(p.map((x) => x.file)))
+  assert.ok(p.every((x) => /跳过条数|skipped/.test(x.expected)), '要指出"不许写死跳过条数"，实际：' +
+    JSON.stringify(p.map((x) => x.expected)))
+})
+
+test('测试现状那一行：失败数不是 0 必须报（文档不能掩盖失败）', () => {
+  const read = statusDoc(
+    '**测试现状：725 个用例，3 失败。**',
+    '**Tests: 725 cases, 3 failures.**')
+  const p = checkTestStatus({ read }).problems
+  assert.equal(p.length, 2)
+  assert.ok(p.every((x) => /0 失败/.test(x.expected)))
+})
+
+test('测试现状那一行：整句被删掉也必须报（否则判据悄悄失效）', () => {
+  const read = statusDoc('## 读我\n\n什么都没写\n', '## Read me\n\nnothing here\n')
+  const p = checkTestStatus({ read }).problems
+  assert.equal(p.length, 2)
+  assert.ok(p.every((x) => /找不到/.test(x.note)), '要说明"句子被删掉之后判据就失效了"')
+})
+
+test('测试现状那一行：说明性的"本轮实测 1 条 / 5 条"不算写死（不误伤）', () => {
+  const read = statusDoc(
+    '**测试现状：725 个用例，0 失败。** 本轮实测：本机 1 条、CI 上 5 条。',
+    '**Tests: 725 cases, 0 failures.** This run: 1 locally, 5 in CI.')
+  assert.deepEqual(checkTestStatus({ read }).problems, [],
+    '只写"总量 + 失败数 + 本轮实测"是正确的写法，不能因为出现数字就报错')
 })
