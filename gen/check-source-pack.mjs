@@ -23,7 +23,12 @@
  *    反过来也不行：只有②时报的是深层的模块解析错误，
  *    而①能直接点出"包里少了哪几个文件"。
  *
- * 用法：node gen/check-source-pack.mjs
+ * 结构判据抽成纯函数 `packStructureProblems({ names, need })`、清单抽成
+ * `requiredFiles(root)`、打包抽成 `buildPack(root)` —— 这样
+ * `test/source-pack.test.js` 能喂假清单反过来验它（少一个必需文件必须报、
+ * 混进凭据文件必须报），而不用每次真打一份包才能验逻辑。
+ *
+ * 用法：node gen/check-source-pack.mjs [--root=<另一棵树>]
  */
 import {
   readFileSync, existsSync, readdirSync, statSync,
@@ -35,11 +40,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const rel = (p) => path.relative(ROOT, p).replace(/\\/g, '/')
+
+/** 从 `--key=value` 里取值（测试注入坏掉的副本用） */
+export function argOf(argv, name, fallback) {
+  const hit = argv.find((a) => a.startsWith(`--${name}=`))
+  return hit ? hit.slice(name.length + 3) : fallback
+}
 
 /** 列目录里的普通文件（不存在就返回空；跳过隐藏文件） */
-function filesIn(dir) {
-  const abs = path.join(ROOT, dir)
+export function filesIn(root, dir) {
+  const abs = path.join(root, dir)
   if (!existsSync(abs)) return []
   return readdirSync(abs)
     .filter((f) => !f.startsWith('.'))
@@ -48,15 +58,16 @@ function filesIn(dir) {
 }
 
 /** 沿静态 import 走模块图（只跟相对路径；`node:` 内置模块不是文件） */
-function moduleGraph(entry, seen = new Set()) {
-  const abs = path.resolve(ROOT, entry)
+export function moduleGraph(root, entry, seen = new Set()) {
+  const abs = path.resolve(root, entry)
   if (seen.has(abs) || !existsSync(abs)) return seen
   seen.add(abs)
   const src = readFileSync(abs, 'utf8')
   const re = /(?:^|\n)\s*(?:import|export)[^\n]*?from\s*['"](\.[^'"]+)['"]|(?:^|\n)\s*import\s*['"](\.[^'"]+)['"]/g
   let m
   while ((m = re.exec(src))) {
-    moduleGraph(rel(path.resolve(path.dirname(abs), m[1] ?? m[2])), seen)
+    const rel = path.relative(root, path.resolve(path.dirname(abs), m[1] ?? m[2])).replace(/\\/g, '/')
+    moduleGraph(root, rel, seen)
   }
   return seen
 }
@@ -65,8 +76,9 @@ function moduleGraph(entry, seen = new Set()) {
  * 一个"完整的源码树"至少要有这些东西。
  * 入口的模块图是**自动走出来的**，所以以后新增模块不会被漏掉。
  */
-function requiredFiles() {
-  const graph = [...moduleGraph('bin/flicker.js')].map(rel)
+export function requiredFiles(root = ROOT) {
+  const graph = [...moduleGraph(root, 'bin/flicker.js')]
+    .map((p) => path.relative(root, p).replace(/\\/g, '/'))
   const extra = [
     'bin/flicker.js', 'package.json', 'LICENSE', 'README.md', '读我.md',
     'CHANGELOG.md', '变更记录.md',
@@ -75,21 +87,42 @@ function requiredFiles() {
     'entry/sea-entry.cjs',
     '启动.cmd', '启动.command', '启动.sh',
   ]
-  const gen = filesIn('gen').map((f) => `gen/${f}`)
-  const examples = filesIn('examples/plugins').map((f) => `examples/plugins/${f}`)
+  const gen = filesIn(root, 'gen').map((f) => `gen/${f}`)
+  const examples = filesIn(root, 'examples/plugins').map((f) => `examples/plugins/${f}`)
   const docs = []
   for (const dir of ['中文文档', 'docs']) {
-    for (const f of filesIn(dir)) if (f.endsWith('.md')) docs.push(`${dir}/${f}`)
+    for (const f of filesIn(root, dir)) if (f.endsWith('.md')) docs.push(`${dir}/${f}`)
   }
   return [...new Set([...graph, ...extra, ...gen, ...examples, ...docs])].sort()
 }
 
+/** 打包里的文件名不该长这样 */
+export function isForbidden(rel) {
+  return rel.startsWith('dist/') || rel.startsWith('node_modules/') || rel.startsWith('_lab/out/') ||
+    rel.startsWith('.git/') ||
+    // ⚠️ 凭据类文件：赠品是**要送给别人的**，密钥绝不能跟着走（产物里也会有一份）
+    /(^|\/)(api-token|\.env|credentials?|secrets?)[^/]*$/i.test(rel)
+}
+
+/**
+ * 结构判据（纯函数：只比两个名字集合，不碰磁盘）。
+ * @param {{names:Set<string>|string[], need:string[]}} p
+ * @returns {{missing:string[], forbidden:string[], credential:string[]}}
+ */
+export function packStructureProblems({ names, need }) {
+  const have = names instanceof Set ? names : new Set(names)
+  const missing = need.filter((f) => !have.has(f))
+  const forbidden = [...have].filter(isForbidden)
+  const credential = forbidden.filter((f) => /token|credential|secret|\.env$/i.test(f))
+  return { missing, forbidden, credential }
+}
+
 /** 打出真包并列出里面的文件（FKZ1 容器，格式见 src/gift.js 顶部注释） */
-async function buildPack() {
+export async function buildPack(root = ROOT) {
   const { installFromDisk } = await import('../src/assets.js')
-  installFromDisk(ROOT)
+  installFromDisk(root)
   const { buildSourcePack, unpackArchive } = await import('../src/gift.js')
-  const pack = await buildSourcePack(ROOT)
+  const pack = await buildSourcePack(root)
   const buf = pack.bytes
   // ⚠️ 用 `src/gift.js` 的**唯一**读实现，不在这里再手写一遍：
   //    同一个容器格式两份解析器，迟早会出现"打包端能读、解包端读不了"这种最难查的漂移。
@@ -97,56 +130,74 @@ async function buildPack() {
   return { bytes: buf, entries, docCount: pack.docCount }
 }
 
-const pack = await buildPack()
-const names = new Set(pack.entries.map((e) => e.rel))
-const need = requiredFiles()
+/**
+ * 核一棵树：结构 + 就地解开真跑一次。
+ * @returns {Promise<{problems:string[], info:string[], entries:number, docCount:number, names:Set<string>}>}
+ */
+export async function auditSourcePack(root = ROOT, { runVersion = true } = {}) {
+  const problems = []
+  const info = []
+  const pack = await buildPack(root)
+  const names = new Set(pack.entries.map((e) => e.rel))
+  const need = requiredFiles(root)
 
-// ── ① 结构 ─────────────────────────────────────────────────
-const missing = need.filter((f) => !names.has(f))
-const forbidden = [...names].filter((n) =>
-  n.startsWith('dist/') || n.startsWith('node_modules/') || n.startsWith('_lab/out/') ||
-  n.startsWith('.git/') ||
-  // ⚠️ 凭据类文件：赠品是**要送给别人的**，密钥绝不能跟着走（产物里也会有一份）
-  /(^|\/)(api-token|\.env|credentials?|secrets?)[^/]*$/i.test(n))
+  info.push(`源码包：${pack.entries.length} 个文件（其中文档 ${pack.docCount} 份）；` +
+    `按模块图与资源算下来至少需要 ${need.length} 项`)
 
-console.log(`源码包：${pack.entries.length} 个文件（其中文档 ${pack.docCount} 份）；` +
-  `按模块图与资源算下来至少需要 ${need.length} 项`)
-
-if (missing.length) {
-  console.error(`\n✗ 源码包少了 ${missing.length} 个必需文件 —— 对方拿到的是一个跑不起来的半份源码：`)
-  for (const f of missing) console.error(`    ${f}`)
-  console.error('\n如果这是被 src/gift.js 的 PACK_EXCLUDES 排除掉的，请把排除规则改回来；' +
-    '\n（清单是遍历式的，所以"少了文件"通常意味着排除规则写宽了。）')
-}
-if (forbidden.length) {
-  console.error(`\n✗ 源码包里混进了不该有的东西（${forbidden.length} 项）：`)
-  for (const f of forbidden.slice(0, 10)) console.error(`    ${f}`)
-  console.error('\n构建产物、依赖目录、体检日志都不该进赠品。')
-  if (forbidden.some((f) => /token|credential|secret|\.env$/i.test(f))) {
-    console.error('\n⚠️ 其中含有**凭据类文件**！这类东西一旦进了赠品，就等于把钥匙')
-    console.error('   连同源码一起送给对方（而且产物里也会有一份）。')
-    console.error('   修法：把它加进 src/gift.js 的 PACK_EXCLUDES（并确认 .gitignore 也忽略了它）。')
+  const { missing, forbidden, credential } = packStructureProblems({ names, need })
+  if (missing.length) {
+    problems.push(`源码包少了 ${missing.length} 个必需文件 —— 对方拿到的是一个跑不起来的半份源码：\n` +
+      missing.map((f) => `    ${f}`).join('\n') +
+      '\n如果这是被 src/gift.js 的 PACK_EXCLUDES 排除掉的，请把排除规则改回来；' +
+      '\n（清单是遍历式的，所以"少了文件"通常意味着排除规则写宽了。）')
   }
-}
-if (missing.length || forbidden.length) process.exit(1)
-
-// ── ② 行为：解开真包，在里面真的跑一次 ─────────────────────
-const dir = mkdtempSync(path.join(tmpdir(), 'flicker-check-pack-'))
-try {
-  for (const e of pack.entries) {
-    const full = path.join(dir, e.rel)
-    mkdirSync(path.dirname(full), { recursive: true })
-    writeFileSync(full, e.data)
+  if (forbidden.length) {
+    let msg = `源码包里混进了不该有的东西（${forbidden.length} 项）：\n` +
+      forbidden.slice(0, 10).map((f) => `    ${f}`).join('\n') +
+      '\n构建产物、依赖目录、体检日志都不该进赠品。'
+    if (credential.length) {
+      msg += '\n⚠️ 其中含有**凭据类文件**！这类东西一旦进了赠品，就等于把钥匙' +
+        '\n   连同源码一起送给对方（而且产物里也会有一份）。' +
+        '\n   修法：把它加进 src/gift.js 的 PACK_EXCLUDES（并确认 .gitignore 也忽略了它）。'
+    }
+    problems.push(msg)
   }
-  const r = spawnSync(process.execPath, ['bin/flicker.js', '--version'],
-    { cwd: dir, encoding: 'utf8', windowsHide: true })
-  if (r.status !== 0) {
-    console.error(`\n✗ 源码包解开后**跑不起来**（退出码 ${r.status}）：`)
-    console.error((r.stderr || r.stdout || '').split('\n').slice(0, 12).map((l) => '    ' + l).join('\n'))
-    console.error('\n判据：接收方解压后应当能直接 `node bin/flicker.js --version`。')
+  if (problems.length) return { problems, info, entries: pack.entries.length, docCount: pack.docCount, names }
+
+  if (!runVersion) return { problems, info, entries: pack.entries.length, docCount: pack.docCount, names }
+
+  // ── ② 行为：解开真包，在里面真的跑一次 ───────────────────
+  const dir = mkdtempSync(path.join(tmpdir(), 'flicker-check-pack-'))
+  try {
+    for (const e of pack.entries) {
+      const full = path.join(dir, e.rel)
+      mkdirSync(path.dirname(full), { recursive: true })
+      writeFileSync(full, e.data)
+    }
+    const r = spawnSync(process.execPath, ['bin/flicker.js', '--version'],
+      { cwd: dir, encoding: 'utf8', windowsHide: true })
+    if (r.status !== 0) {
+      problems.push(`源码包解开后**跑不起来**（退出码 ${r.status}）：\n` +
+        (r.stderr || r.stdout || '').split('\n').slice(0, 12).map((l) => '    ' + l).join('\n') +
+        '\n判据：接收方解压后应当能直接 `node bin/flicker.js --version`。')
+    } else {
+      info.push(`✓ 结构完整，且解开后能跑起来（--version → ${JSON.stringify((r.stdout || '').trim())}）`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return { problems, info, entries: pack.entries.length, docCount: pack.docCount, names }
+}
+
+// ── CLI ──────────────────────────────────────────────────────
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+if (isMain) {
+  const root = argOf(process.argv.slice(2), 'root', ROOT)
+  const { problems, info } = await auditSourcePack(root)
+  for (const line of info) console.log(line)
+  if (problems.length) {
+    for (const p of problems) console.error(`\n✗ ${p}`)
     process.exit(1)
   }
-  console.log(`✓ 结构完整，且解开后能跑起来（--version → ${JSON.stringify((r.stdout || '').trim())}）`)
-} finally {
-  rmSync(dir, { recursive: true, force: true })
 }

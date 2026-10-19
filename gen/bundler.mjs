@@ -145,7 +145,7 @@ function stripModuleSyntax(src, { label }) {
  * 等长是为了让报错行号仍然对得上。
  * 只处理 // 与 /* *\/ 两种；不处理字符串里的"//"，那种情况这里不会遇到。
  */
-function stripComments(src) {
+export function stripComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/(^|[^:'"\\])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length))
