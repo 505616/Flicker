@@ -136,3 +136,29 @@ test('inject：已有块就替换，没有就插在 </head> 之前', () => {
   const twice = inject(once, block)
   assert.equal(twice, once, '重复注入必须幂等（否则每次生成都会长一块）')
 })
+
+test('⭐ 控件的颜色写死（不引用页面变量）—— 否则会出现"黑底黑字，看不见"', () => {
+  // 2026-10 实测过的 bug：第一版用 `var(--text)` / `var(--card)` 取色，
+  // 而三个页面的变量名并不统一，漏一个就成了"深色药丸 + 同色文字"，
+  // 用户看到的是"按钮本身是黑的，看不到 A− 和 A+"。
+  const cssPart = SRC.slice(SRC.indexOf('var CSS = ['), SRC.indexOf('].join(\'\')'))
+  assert.ok(cssPart.length > 100, '应当能找到控件的 CSS 段')
+  assert.ok(!/var\(--/.test(cssPart),
+    '控件的 CSS 里不许出现 var(--…)：页面变量的名字各页不同，漏一个就看不见字')
+  assert.match(cssPart, /background:#1b1b1f/, '药丸背景要写死成深色')
+  assert.match(cssPart, /color:#ffffff/, '按钮文字要写死成白色（与深底形成对比）')
+  assert.match(cssPart, /\.fk-fs button:disabled/, '到顶/到底要能看出"点不动了"')
+})
+
+test('⭐ 二维码必须够大：128px 的盒子手机上认不出（实测）', () => {
+  // 2026-10 用户反馈"扫二维码根本没反应，识别不出那是个二维码"。
+  // 实测：canvas 内部分辨率 256、外部只显示 116px —— 每个模块不到 3px，
+  // 手机相机确实认不出来。现在盒子 220px、内部 320px。
+  const html = readPage('web/station.html')
+  const m = html.match(/\.qr\{width:(\d+)px/)
+  assert.ok(m, '应当能找到 .qr 的尺寸规则')
+  assert.ok(Number(m[1]) >= 200, `.qr 的宽度太小（${m[1]}px），手机上认不出`)
+  assert.match(html, /<canvas id="recvQr" width="320" height="320">/, '接收模式的二维码内部要 320px')
+  assert.match(html, /<canvas id="qrCanvas" width="320" height="320">/, '发送端等待页的二维码也要 320px')
+  assert.match(html, /image-rendering:pixelated/, '放大时模块边缘要保持锐利（否则相机更认不出）')
+})

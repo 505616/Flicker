@@ -2,8 +2,8 @@
  * ⚠️ 构建产物，请勿手工编辑。
  * 由 gen/gen-relay-page.mjs 从 web/receiver.html 生成。
  *
- * 源文件 SHA-256（前 16 位）: b88e470f1769c2e1
- * 页面大小: 174.8 KB
+ * 源文件 SHA-256（前 16 位）: d17ce5dc74e56a8e
+ * 页面大小: 175.3 KB
  *
  * 改页面请改 web/receiver.html，然后重新运行：node gen/gen-relay-page.mjs
  */
@@ -895,18 +895,24 @@ globalThis.__I18N_PERSIST__ = false;
       try { if (global.FlickerI18N && global.FlickerI18N.apply) global.FlickerI18N.apply() } catch (e) { /* 没有 i18n 也能用 */ }
     }
 
+    // ⚠️ 颜色**写死**，不引用页面的 CSS 变量。
+    //    第一版用了 \`var(--text)\` / \`var(--card)\`：三个页面的变量名并不统一
+    //    （站点页是 --text/--bg-elev，手机页又是另一套），漏一个就会变成
+    //    "深色药丸 + 同色文字" —— 用户实测"按钮本身是黑的，看不到 A− 和 A+"。
+    //    深底 + 浅字在浅色页面上是醒目的一小块，在深色页面上也融得进去，
+    //    两边都看得清，所以干脆不依赖任何变量。
     var CSS = [
       // 底部留出控件本身的高度：否则它可能盖住页面最下面那个按钮/文字
       'body{padding-bottom:calc(60px + env(safe-area-inset-bottom))}',
       '.fk-fs{position:fixed;z-index:60;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));',
-      'display:flex;align-items:center;gap:4px;padding:4px;border:1px solid var(--line,#333);',
-      'border-radius:999px;background:var(--card,rgba(20,20,22,.92));box-shadow:0 2px 10px rgba(0,0,0,.35);',
-      'font-size:14px;line-height:1}',
+      'display:flex;align-items:center;gap:4px;padding:4px;',
+      'border:1px solid rgba(255,255,255,.28);border-radius:999px;background:#1b1b1f;',
+      'box-shadow:0 2px 10px rgba(0,0,0,.35);font-size:14px;line-height:1}',
       '.fk-fs button{font:inherit;font-size:14px;min-width:36px;min-height:34px;padding:0 8px;cursor:pointer;',
-      'color:var(--text,#eee);background:transparent;border:0;border-radius:999px}',
-      '.fk-fs button:active{background:rgba(255,255,255,.14)}',
-      '.fk-fs button:disabled{opacity:.35;cursor:default}',
-      '.fk-fs .fk-fs-pct{min-width:52px;font-variant-numeric:tabular-nums;font-size:13px;color:var(--dim,#aaa)}',
+      'color:#ffffff;background:transparent;border:0;border-radius:999px}',
+      '.fk-fs button:active{background:rgba(255,255,255,.2)}',
+      '.fk-fs button:disabled{opacity:.4;cursor:default}',
+      '.fk-fs .fk-fs-pct{min-width:52px;font-variant-numeric:tabular-nums;font-size:13px;color:#dcdce2}',
     ].join('')
 
     function mount() {
@@ -2542,4 +2548,4 @@ $('btnCancel').addEventListener('click', () => {
 `
 
 /** 页面内容的指纹，用于自检"部署的页面与源文件是否一致" */
-export const RECEIVER_HTML_DIGEST = 'b88e470f1769c2e1'
+export const RECEIVER_HTML_DIGEST = 'd17ce5dc74e56a8e'
