@@ -588,12 +588,16 @@ const QR = (() => {
   }
 
   // 各版本的容量与对齐图案位置（字节模式，纠错 M）
+  // 版本表：groups 里是 [块数, **每块数据码字数**]，ec 是每块的纠错码字数。
+  // ⚠️ 这张表曾经填的是"每块的总码字数"（v1 = 26），于是数据区被塞进 26+10 字节、
+  //    矩阵只装得下 26 —— 多出来的被静默截断。定位图案、定时图案全都正常，
+  //    扫码软件能"看到"它，却永远解不出来（用户实测："识别不出这是个二维码"）。
   const SPEC = {
-    1: { ec: 10, groups: [[1, 26]] }, 2: { ec: 16, groups: [[1, 44]] },
-    3: { ec: 26, groups: [[1, 70]] }, 4: { ec: 18, groups: [[2, 50]] },
-    5: { ec: 24, groups: [[2, 67]] }, 6: { ec: 16, groups: [[4, 43]] },
-    7: { ec: 18, groups: [[4, 49]] }, 8: { ec: 22, groups: [[2, 60], [2, 61]] },
-    9: { ec: 20, groups: [[3, 58], [2, 59]] }, 10: { ec: 24, groups: [[4, 69], [1, 70]] },
+    1: { ec: 10, groups: [[1, 16]] }, 2: { ec: 16, groups: [[1, 28]] },
+    3: { ec: 26, groups: [[1, 44]] }, 4: { ec: 18, groups: [[2, 32]] },
+    5: { ec: 24, groups: [[2, 43]] }, 6: { ec: 16, groups: [[4, 27]] },
+    7: { ec: 18, groups: [[4, 31]] }, 8: { ec: 22, groups: [[2, 38], [2, 39]] },
+    9: { ec: 22, groups: [[3, 36], [2, 37]] }, 10: { ec: 26, groups: [[4, 43], [1, 44]] },
   }
   const ALIGN = { 1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50] }
 
@@ -601,9 +605,10 @@ const QR = (() => {
     const bytes = Buffer.from(text, 'utf8')
     let ver = 0
     for (let v = 1; v <= 10; v++) {
-      const totalBits = SPEC[v].groups.reduce((s, [n, k]) => s + n * k, 0) * 8
+      // 可用容量 = **数据**码字数（不含纠错）。用它判断放不放得下。
+      const dataBits = SPEC[v].groups.reduce((s, [n, k]) => s + n * k, 0) * 8
       const need = 4 + (v <= 9 ? 8 : 16) + bytes.length * 8
-      if (need <= totalBits) { ver = v; break }
+      if (need <= dataBits) { ver = v; break }
     }
     if (!ver) return null
 
@@ -668,12 +673,27 @@ const QR = (() => {
       if (m[i][6] === null) setF(i, 6, i % 2 === 0 ? 1 : 0)
     }
     // 固定的暗模块
-    setF(size - 8, 8, 1)
+    setF(8, size - 8, 1)
     // 预留格式信息区
     for (let i = 0; i < 9; i++) { if (m[8][i] === null) setF(8, i, 0); if (m[i][8] === null) setF(i, 8, 0) }
     for (let i = 0; i < 8; i++) { if (m[8][size - 1 - i] === null) setF(8, size - 1 - i, 0); if (m[size - 1 - i][8] === null) setF(size - 1 - i, 8, 0) }
 
     // 数据（之字形，跳过时序列）
+    // ── 版本信息（v7 起才有，两块 6×3）──
+    // ⚠️ 从前完全没写这两块、也没把它们当功能区：于是 36 个模块被当成数据区，
+    //    码字数比版本表多出 4.5 个 —— 解码器按版本表读，读到的东西自然对不上。
+    if (ver >= 7) {
+      let rem = ver
+      for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25)
+      const verBits = (ver << 12) | rem
+      for (let i = 0; i < 18; i++) {
+        const bit = (verBits >> i) & 1
+        const a = size - 11 + (i % 3)
+        const b = Math.floor(i / 3)
+        setF(a, b, bit)
+        setF(b, a, bit)
+      }
+    }
     let bitIdx = 0
     const bits = []
     for (const w of codewords) for (let i = 7; i >= 0; i--) bits.push((w >> i) & 1)
@@ -702,15 +722,15 @@ const QR = (() => {
     for (let i = 14; i >= 10; i--) if ((fmtData >> i) & 1) fmtData ^= 0b10100110111 << (i - 10)
     const fmtFull = (((0b00 << 3) | 0) << 10 | fmtData) ^ 0b101010000010010
     for (let i = 0; i < 15; i++) {
-      const b = (fmtFull >> i) & 1
+      const b = (fmtFull >> (14 - i)) & 1
       if (i < 6) setF(8, i, b)
       else if (i < 8) setF(8, i + 1, b)
       else if (i === 8) setF(7, 8, b)
       else setF(14 - i, 8, b)
     }
-    for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, (fmtFull >> i) & 1)
-    for (let i = 8; i < 15; i++) setF(8, size - 15 + i, (fmtFull >> i) & 1)
-    setF(size - 8, 8, 1)
+    for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, (fmtFull >> (14 - i)) & 1)
+    for (let i = 8; i < 15; i++) setF(8, size - 15 + i, (fmtFull >> (14 - i)) & 1)
+    setF(8, size - 8, 1)
     return m
   }
 
@@ -719,6 +739,11 @@ const QR = (() => {
     if (r < 9 && c >= size - 8) return true
     if (r >= size - 8 && c < 9) return true
     if (r === 6 || c === 6) return true
+    // v7 起的版本信息：右上角 rows 0..5 × cols size-11..size-9，左下角转置
+    if (ver >= 7) {
+      if (r < 6 && c >= size - 11 && c < size - 8) return true
+      if (c < 6 && r >= size - 11 && r < size - 8) return true
+    }
     for (const ar of ALIGN[ver]) for (const ac of ALIGN[ver]) {
       if ((ar <= 8 && ac <= 8) || (ar <= 8 && ac >= size - 9) || (ar >= size - 9 && ac <= 8)) continue
       if (Math.abs(r - ar) <= 2 && Math.abs(c - ac) <= 2) return true
@@ -762,19 +787,20 @@ const QR = (() => {
     }
     return res
   }
+  // 版本表：groups 里是 [块数, **每块数据码字数**]（填错会"结构正常、数据全错"）
   const SPEC = {
-    1:{ec:10,groups:[[1,26]]}, 2:{ec:16,groups:[[1,44]]}, 3:{ec:26,groups:[[1,70]]},
-    4:{ec:18,groups:[[2,50]]}, 5:{ec:24,groups:[[2,67]]}, 6:{ec:16,groups:[[4,43]]},
-    7:{ec:18,groups:[[4,49]]}, 8:{ec:22,groups:[[2,60],[2,61]]},
-    9:{ec:20,groups:[[3,58],[2,59]]}, 10:{ec:24,groups:[[4,69],[1,70]]},
+    1:{ec:10,groups:[[1,16]]}, 2:{ec:16,groups:[[1,28]]}, 3:{ec:26,groups:[[1,44]]},
+    4:{ec:18,groups:[[2,32]]}, 5:{ec:24,groups:[[2,43]]}, 6:{ec:16,groups:[[4,27]]},
+    7:{ec:18,groups:[[4,31]]}, 8:{ec:22,groups:[[2,38],[2,39]]},
+    9:{ec:22,groups:[[3,36],[2,37]]}, 10:{ec:26,groups:[[4,43],[1,44]]},
   }
   const ALIGN = { 1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50] }
   function encode(text) {
     const bytes = Array.from(new TextEncoder().encode(text))
     let ver = 0
     for (let v = 1; v <= 10; v++) {
-      const totalBits = SPEC[v].groups.reduce((s, g) => s + g[0] * g[1], 0) * 8
-      if (4 + (v <= 9 ? 8 : 16) + bytes.length * 8 <= totalBits) { ver = v; break }
+      const dataBits = SPEC[v].groups.reduce((s, g) => s + g[0] * g[1], 0) * 8
+      if (4 + (v <= 9 ? 8 : 16) + bytes.length * 8 <= dataBits) { ver = v; break }
     }
     if (!ver) return null
     const spec = SPEC[ver]
@@ -816,9 +842,21 @@ const QR = (() => {
       if (m[6][i] === null) setF(6, i, i % 2 === 0 ? 1 : 0)
       if (m[i][6] === null) setF(i, 6, i % 2 === 0 ? 1 : 0)
     }
-    setF(size - 8, 8, 1)
+    setF(8, size - 8, 1)
     for (let i = 0; i < 9; i++) { if (m[8][i] === null) setF(8, i, 0); if (m[i][8] === null) setF(i, 8, 0) }
     for (let i = 0; i < 8; i++) { if (m[8][size-1-i] === null) setF(8, size-1-i, 0); if (m[size-1-i][8] === null) setF(size-1-i, 8, 0) }
+    if (ver >= 7) {
+      let rem = ver
+      for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25)
+      const verBits = (ver << 12) | rem
+      for (let i = 0; i < 18; i++) {
+        const bit = (verBits >> i) & 1
+        const a = size - 11 + (i % 3)
+        const b = Math.floor(i / 3)
+        setF(a, b, bit)
+        setF(b, a, bit)
+      }
+    }
     let bitIdx = 0; const bits = []
     for (const w of codewords) for (let i = 7; i >= 0; i--) bits.push((w >> i) & 1)
     let up = true
@@ -838,13 +876,13 @@ const QR = (() => {
     for (let i = 14; i >= 10; i--) if ((fmtData >> i) & 1) fmtData ^= 0b10100110111 << (i - 10)
     const fmtFull = ((0 << 3 | 0) << 10 | fmtData) ^ 0b101010000010010
     for (let i = 0; i < 15; i++) {
-      const b = (fmtFull >> i) & 1
+      const b = (fmtFull >> (14 - i)) & 1
       if (i < 6) setF(8, i, b); else if (i < 8) setF(8, i + 1, b)
       else if (i === 8) setF(7, 8, b); else setF(14 - i, 8, b)
     }
-    for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, (fmtFull >> i) & 1)
-    for (let i = 8; i < 15; i++) setF(8, size - 15 + i, (fmtFull >> i) & 1)
-    setF(size - 8, 8, 1)
+    for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, (fmtFull >> (14 - i)) & 1)
+    for (let i = 8; i < 15; i++) setF(8, size - 15 + i, (fmtFull >> (14 - i)) & 1)
+    setF(8, size - 8, 1)
     return m
   }
   function isFunctionModule(ver, size, r, c) {
@@ -852,6 +890,10 @@ const QR = (() => {
     if (r < 9 && c >= size - 8) return true
     if (r >= size - 8 && c < 9) return true
     if (r === 6 || c === 6) return true
+    if (ver >= 7) {
+      if (r < 6 && c >= size - 11 && c < size - 8) return true
+      if (c < 6 && r >= size - 11 && r < size - 8) return true
+    }
     for (const ar of ALIGN[ver]) for (const ac of ALIGN[ver]) {
       if ((ar <= 8 && ac <= 8) || (ar <= 8 && ac >= size - 9) || (ar >= size - 9 && ac <= 8)) continue
       if (Math.abs(r - ar) <= 2 && Math.abs(c - ac) <= 2) return true
@@ -862,6 +904,17 @@ const QR = (() => {
 })()
 function qrMatrix(text) { try { return QR.encode(text) } catch { return null } }
 `
+
+/**
+ * 终端那份编码器的矩阵。
+ *
+ * 导出它是为了让判据把**两份实现**（终端这份真代码 / `BROWSER_QR_SOURCE` 里的模板副本）
+ * 产生的矩阵逐格比一遍：2026-10 修编码器时两个副本都得改，只改一处的话
+ * "命令行能扫、界面扫不出"（或反过来）根本没人会发现。
+ */
+export function qrMatrixTerminal(text) {
+  try { return QR.encode(text) } catch { return null }
+}
 
 /** 生成二维码的行数组（半块字符，两行像素拼一行） */
 function qrLines(text) {
