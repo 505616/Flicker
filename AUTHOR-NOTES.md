@@ -4,9 +4,10 @@
 > plus a few words the author added later.
 > The text is kept essentially as it was —— only subheadings were added and run-on sentences were
 > split into paragraphs.
-> **Two changes the author asked for in 2026-10**: the contact details were replaced with a Steam
-> friend code and a Bilibili account, and a note was added about what "tested and passing" means
-> (he does not have enough devices to verify everything).
+> **Three changes the author asked for in 2026-10**: the contact details were replaced with a Steam
+> friend code and a Bilibili account; a note was added about what "tested and passing" means
+> (he does not have enough devices to verify everything); and one more statement was added:
+> **everything in this project was written by DeepSeek**.
 
 ## The original request
 
@@ -21,6 +22,8 @@ The above is the original request I gave DeepSeek
 I state:
 
 I personally have no coding ability at all; this is pure wish-driven development.
+
+Everything in this project was written by DeepSeek.
 
 My English is very poor. If there is a request or a bug report in English, I will translate it with AI and fix it.
 
