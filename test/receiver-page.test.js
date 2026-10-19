@@ -326,10 +326,19 @@ test('⭐ 接收端页面不写跨会话的持久化存储（不留痕迹）', (
       `接收端页面的**代码**里不应出现 ${bad} —— 会在对方浏览器里留下跨会话的痕迹。` +
       '要记住界面偏好就用 sessionStorage（关标签即消失）。')
   }
-  // sessionStorage 只允许用来存语言偏好这一个键，不许存别的
+  // sessionStorage 允许存**界面偏好**：语言 + 字号（2026-10 加的字体大小调节）。
+  // 两者都只影响界面观感，关掉标签即消失，绝不涉及链接 / 令牌 / 传输数据。
+  //
+  // ⚠️ 数量上限放宽到 10 是因为字号控件是内联进来的一小段（读一次、写一次、
+  //    能力检测几次）。**真正的约束是"记的只能是偏好"** —— 上面那条
+  //    （所有 setItem 的键）与下面这条（键名必须在这两个之内）才是要紧的。
   const uses = [...code.matchAll(/sessionStorage[.\w]*/g)].map((m) => m[0])
-  assert.ok(uses.length <= 2,
-    `sessionStorage 的使用点偏多（${uses.length} 处）—— 确认只用来存语言偏好`)
+  assert.ok(uses.length <= 10,
+    `sessionStorage 的使用点偏多（${uses.length} 处）—— 确认只用来存界面偏好（语言 / 字号）`)
+  assert.match(code, /flicker\.fontScale/,
+    '字号偏好应当存进 sessionStorage，键是 flicker.fontScale')
+  assert.doesNotMatch(code, /setItem\(\s*['"`][^'"`]*(token|salt|hash)/i,
+    '任何存储都不许写链接里的令牌/盐')
   assert.match(html, /globalThis\.__I18N_PERSIST__ = false;/,
     '接收端必须显式关掉"跨会话记住语言"，否则运行时会去用 localStorage')
   assert.match(code, /typeof sessionStorage/,

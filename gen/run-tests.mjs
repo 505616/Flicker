@@ -40,7 +40,7 @@ const FAST = new Set([
   'i18n.test.js', 'pwa.test.js', 'session-cert.test.js', 'asset-digests.test.js',
   'docs-pairing.test.js', 'manifest-doc.test.js', 'changelog.test.js',
   'receiver-prefetch.test.js', 'chunk-size.test.js', 'receiver-hash-worker.test.js',
-  'handshake-downgrade.test.js', 'line-endings.test.js', 'doc-numbers.test.js', 'doc-paths.test.js',
+  'handshake-downgrade.test.js', 'line-endings.test.js', 'doc-numbers.test.js', 'doc-paths.test.js', 'font-scale.test.js',
 ])
 
 const all = readdirSync(path.join(ROOT, 'test'))

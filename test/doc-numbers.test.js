@@ -69,7 +69,10 @@ test('② 反向验证：句式被整句删掉 → 报"没找到声明"，不许
   const facts = collectFacts({ root: ROOT })
   const file = 'docs/路线图.md'
   const real = read(file)
-  const stripped = real.replace(/\(373 strings, Chinese and English side by side\)/, '(文案条数见下)')
+  // ⚠️ 按**当前**条数构造反例：写死 373 的话，文案表一改这条用例自己就失效
+  //    （而它失效的样子是"通过"—— 比红更糟）。
+  const n = collectFacts({ root: ROOT }).find((f) => f.id === 'i18n.count').value
+  const stripped = real.replace(new RegExp(`\\(${n} strings, Chinese and English side by side\\)`), '(文案条数见下)')
   assert.notEqual(stripped, real)
   const r = checkFacts({ facts, read: (rel) => (rel === file ? stripped : read(rel)) })
   const hit = r.problems.find((p) => p.file === file && /没找到这句声明/.test(String(p.note)))

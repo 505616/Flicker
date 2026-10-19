@@ -39,6 +39,9 @@ export const STRINGS = {
     'common.seconds': '{n} 秒',
     'common.minutes': '{n} 分',
     'common.langSwitch': 'English',
+    'fontScale.smaller': '缩小字体',
+    'fontScale.larger': '放大字体',
+    'fontScale.reset': '恢复默认字号（当前 {pct}%）',
 
     // ── 接收端：标题 ──
     'recv.title': '闪传 Flicker · 接收文件',
@@ -392,6 +395,7 @@ export const STRINGS = {
     'recvui.start': '开始接收',
     'recvui.back': '返回发送',
     'recvui.scanHint': '手机和电脑要在同一个 WiFi 下。手机上第一次打开会看到一次「不安全」提示，点「高级 → 继续前往」即可。',
+    'recvui.netHint': '<b>手机打不开这个链接？</b>按顺序试：① 手机和电脑连同一个 WiFi（别用手机流量）；② 电脑上这个程序**别关**（关了就一起销毁）；③ Windows 防火墙弹过询问就选「允许访问」，没弹过就去「允许应用通过防火墙」里给「闪传」或 Node 打勾；④ 电脑的网络如果是「公用网络」，Windows 默认会拦住手机连进来 —— 把它改成「专用网络」；⑤ 手机开着 VPN / 代理（尤其是全局模式）时先关掉。',
     'recvui.copyLink': '复制链接',
     'recvui.pwLabel': '一次性密码（手机上要输入它）',
     'recvui.dirShowLabel': '保存到',
@@ -478,6 +482,9 @@ export const STRINGS = {
     'common.seconds': '{n}s',
     'common.minutes': '{n}m',
     'common.langSwitch': '中文',
+    'fontScale.smaller': 'Smaller text',
+    'fontScale.larger': 'Larger text',
+    'fontScale.reset': 'Reset text size (currently {pct}%)',
 
     // ── Receiver: titles ──
     'recv.title': 'Flicker · Receive files',
@@ -846,6 +853,7 @@ export const STRINGS = {
     'recvui.start': 'Start receiving',
     'recvui.back': 'Back to sending',
     'recvui.scanHint': 'Phone and computer must be on the same WiFi. The phone will show a "not secure" warning the first time — tap "Advanced → Proceed".',
+    'recvui.netHint': '<b>The phone cannot open this link?</b> Try these in order: (1) put the phone and the computer on the same WiFi (not mobile data); (2) keep this program running on the computer (closing it destroys the session); (3) if Windows Firewall asked, choose "Allow access" — if it never asked, tick Flicker or Node under "Allow an app through Windows Firewall"; (4) if the PC network is marked "Public", Windows blocks incoming LAN connections by default — switch it to "Private"; (5) turn off any VPN or proxy on the phone (especially global mode).',
     'recvui.copyLink': 'Copy link',
     'recvui.pwLabel': 'One-time password (typed into the phone)',
     'recvui.dirShowLabel': 'Saving to',

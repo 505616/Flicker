@@ -112,6 +112,11 @@ jobs:
       - name: 手机页协议内核内联段是最新的
         run: node gen/inline-phone.mjs --check
 
+      # 三个页面共用的「字号调节」控件：一份实现（web/font-scale.js）内联进三处，
+      # 这份生成器的 --check 守住"改了控件忘了重跑"。
+      - name: 字号控件内联段是最新的
+        run: node gen/inline-font-scale.mjs --check
+
       # 文档里写着程序不认的参数（2026-10 实测有 5 个：--gui、--quiet、--lang、
       # --connect、--out），用户照着敲只会以为是自己抄错了。
       # 这一条把"参数表里的 `--xxx`"与"bin/flicker.js 真正读到的 flag"摆在一起比。
