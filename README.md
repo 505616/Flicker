@@ -101,7 +101,12 @@ Give up any one of those four, and something else is probably less trouble.
 
 > **P0 / P1 / P2 / P3 complete.** LAN direct transfer, relay across networks, GUI, CLI,
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
-> Cross-network (relay) is **implemented and verified against a real relay**.
+> Cross-network (relay) is **implemented, protocol-tested and end-to-end green against a relay
+> running on this machine**; but **no relay is available right now**, so the "deployed on
+> Cloudflare, genuinely across the internet" path was **not verified in this round** (see
+> "How far this has been tested" below). The earlier relay measurements (29.5 MB/s and so on)
+> live in `CHANGELOG.md` and `路线图.md`; they came from an earlier session, cannot be reproduced
+> now, and therefore are not backed by this document.
 
 ### How far this has been tested (take the untested parts seriously)
 
@@ -112,14 +117,15 @@ browser" is not mistaken for "it has been verified on real phones":
 | Verified | How |
 | --- | --- |
 | LAN direct transfer (computer ↔ computer, computer ↔ phone page) | Automated tests + a real browser (`_lab/e2e-phone-browser.mjs`, `_lab/rehearsal-lan.mjs`) |
-| Cross-network relay (CLI sender → page receiver) | Automated tests + a real browser + a local relay (`_lab/e2e-relay-browser.mjs`) |
-| Web sender (page → relay → page, i.e. the phone-to-phone path) | Two tabs in a real browser + the two real relay artifacts (`_lab/e2e-page-to-page.mjs`), compared byte for byte |
+| Relay end to end (CLI sender → a relay **running on this machine** → page receiver) | Automated tests + a real browser (`_lab/e2e-relay-browser.mjs`). The relay is `relay/local.mjs` (the same protocol code the Worker runs) —— **not a relay deployed on Cloudflare, and nothing crossed the internet** |
+| Web sender (page → a relay **running on this machine** → page, i.e. the phone-to-phone path) | Two browser tabs **on the same machine** plus the two page artifacts packed into the relay (`_lab/e2e-page-to-page.mjs`), compared byte for byte |
 | Certificate trust, single-file artifact and the GUI on Windows | Real Windows hardware (the only platform with a device here) |
 
 | **Not verified** | Why |
 | --- | --- |
 | **Any complete flow on a real phone (Android / iPhone)** | No relay is available to test against right now, and there is no second phone; the phone page has only been driven in a desktop browser |
-| **Phone → phone** over a real Cloudflare relay | Same reason —— a relay has to be deployed first; this version is "written and verified against a local relay" |
+| **Any genuinely cross-network relay path** (deployed on Cloudflare, one machine to another) | No relay is available right now. Every relay row in the table above is a relay on the local loopback |
+| **Phone → phone** over a real Cloudflare relay | Same reason —— a relay has to be deployed first; this version is "written and verified against a relay on this machine" |
 | The relay's `/send` route on the **live Worker** | Only exercised on the local relay (same protocol implementation); it has **never been deployed** |
 | Mobile networks, screen lock, backgrounding, large files on phones | Only a real device can tell |
 | macOS / Linux hardware, code signing, installing the PWA | No devices / no certificate |
