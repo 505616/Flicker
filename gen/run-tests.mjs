@@ -202,9 +202,16 @@ function checkReadmeCounts(file) {
   //   · 只警告的话，实际结果是 —— 数字过期了但没人读那行提醒（2026-10 就这样：
   //     文档写 721 通过 / 4 跳过，实测 724 通过 / 1 跳过，好几天没人发现）；
   //   · 写回去的 diff 会在 `git status` 里露出来，比一句黄字显眼。
+  //
+  // ⚠️ **失败数不为 0 时一个字都不写**：文档里绝不能出现"788 个用例，2 失败"这种
+  //    被机器写上去的失败记录 —— 那等于把一次坏掉的运行固化进 README，而人只看到
+  //    "数字更新过了"。实测踩过：改坏判据的那一轮把 `失败数 0 → 2` 写了进去。
   const changed = []
   const missing = []
-  for (const [f, re] of targets) {
+  if (fail > 0) {
+    console.log(`\n⚠️  这次有 ${fail} 条用例失败，**不**更新 README 里的测试现状（失败不该被写进文档）`)
+  }
+  for (const [f, re] of (fail > 0 ? [] : targets)) {
     const full = path.join(ROOT, f)
     const src = readFileSync(full, 'utf8')
     const m = src.match(re)

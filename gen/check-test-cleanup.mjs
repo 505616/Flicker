@@ -20,21 +20,22 @@
  *   `try { await fn() }` 同时覆盖"同步抛错"和"返回 undefined"两种情况，
  *   而且一处失败不会连累后面的清理；失败只记一笔，绝不吃掉测试结果。
  *
+ * 判据逻辑抽成 `auditCleanupText(src, file)`（纯函数：喂源码文本、回问题清单），
+ * CLI 只负责扫盘与打印 —— `test/test-cleanup.test.js` 用它反过来验
+ * （坏写法要抓到、正确写法与注释里的反面教材不许误报）。
+ *
  * 用法：
  *   node gen/check-test-cleanup.mjs              # 检查 test/
- *   node gen/check-test-cleanup.mjs <目录>       # 检查指定目录（反向验证用）
+ *   node gen/check-test-cleanup.mjs <目录>       # 检查指定目录
  */
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TEST_DIR = process.argv[2]
-  ? path.resolve(process.argv[2])
-  : path.join(ROOT, 'test')
 
 /** 两条判据：单行写法与多行写法各一条 */
-const RULES = [
+export const RULES = [
   {
     name: '收尾循环里用 .catch 接清理函数',
     test: (line) => line.includes('cleanups.reverse()') && line.includes('.catch('),
@@ -45,34 +46,61 @@ const RULES = [
   },
 ]
 
-const files = readdirSync(TEST_DIR)
-  .filter((n) => n.endsWith('.js'))
-  .sort()
-
-const bad = []
-let scanned = 0
-for (const name of files) {
-  const rel = `test/${name}`
-  const lines = readFileSync(path.join(TEST_DIR, name), 'utf8').split('\n')
-  scanned++
-  lines.forEach((line, i) => {
+/**
+ * 核一个文件的收尾写法。
+ * @param {string} src 源码文本
+ * @param {string} file 显示用的文件名
+ * @returns {Array<{file:string, line:number, rule:string, text:string}>}
+ */
+export function auditCleanupText(src, file = '(inline)') {
+  const problems = []
+  src.split('\n').forEach((line, i) => {
     // 注释里解释这条教训是允许的（文档价值），只看真正的代码行
     const code = line.replace(/^\s*(\/\/|\*|\/\*).*$/, '')
     for (const rule of RULES) {
-      if (rule.test(code)) bad.push(`${rel}:${i + 1}  ${rule.name}\n      ${line.trim()}`)
+      if (rule.test(code)) problems.push({ file, line: i + 1, rule: rule.name, text: line.trim() })
     }
   })
+  return problems
 }
 
-console.log(`检查了 ${scanned} 个测试文件的收尾写法`)
-if (bad.length) {
-  console.error(`\n✗ ${bad.length} 处收尾写法会吞掉后续清理（测试进程可能永不退出）：\n`)
-  for (const b of bad) console.error(`  ${b}`)
-  console.error('\n改成：')
-  console.error('  for (const fn of cleanups.reverse()) {')
-  console.error("    try { await fn() } catch (e) { console.error('清理失败：' + (e?.message ?? e)) }")
-  console.error('  }')
-  console.error('\n原因见本脚本头部注释（2026-10 实测：用例全绿但进程挂着不走）。')
-  process.exit(1)
+/**
+ * 扫一个目录。
+ * @param {string} dir 目录（默认仓库的 test/）
+ */
+export function TEST_DIR_OF(root, dir) {
+  const target = dir ?? path.join(root, 'test')
+  const files = readdirSync(target).filter((n) => n.endsWith('.js')).sort()
+  const problems = []
+  let scanned = 0
+  for (const name of files) {
+    scanned++
+    problems.push(...auditCleanupText(readFileSync(path.join(target, name), 'utf8'), `test/${name}`))
+  }
+  return { problems, scanned, dir: target }
 }
-console.log('✓ 收尾写法都能兜住"同步抛错"与"返回 undefined"')
+
+// ── CLI ──────────────────────────────────────────────────────
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+if (isMain) {
+  const arg = process.argv[2]
+  // ⚠️ 这里曾经写错成 `TEST_DIR_OF(path.dirname(arg), path.basename(arg))` —— 于是它去
+  //    `<临时目录>/test` 里找文件，报 ENOENT（`test/test-cleanup-check.test.js` 当场变红）。
+  //    目录参数要**整体**传进去，不要再拆成 root + 名字。
+  const { problems, scanned } = arg
+    ? TEST_DIR_OF(ROOT, path.resolve(arg))
+    : TEST_DIR_OF(ROOT)
+  console.log(`检查了 ${scanned} 个测试文件的收尾写法`)
+  if (problems.length) {
+    console.error(`\n✗ ${problems.length} 处收尾写法会吞掉后续清理（测试进程可能永不退出）：\n`)
+    for (const b of problems) console.error(`  ${b.file}:${b.line}  ${b.rule}\n      ${b.text}`)
+    console.error('\n改成：')
+    console.error('  for (const fn of cleanups.reverse()) {')
+    console.error("    try { await fn() } catch (e) { console.error('清理失败：' + (e?.message ?? e)) }")
+    console.error('  }')
+    console.error('\n原因见本脚本头部注释（2026-10 实测：用例全绿但进程挂着不走）。')
+    process.exit(1)
+  }
+  console.log('✓ 收尾写法都能兜住"同步抛错"与"返回 undefined"')
+}

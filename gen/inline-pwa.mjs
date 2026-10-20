@@ -33,7 +33,16 @@ import { fileURLToPath } from 'node:url'
 import { icons, COLORS } from './pwa-assets.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const PAGES = ['web/receiver.html', 'web/station.html'].map((p) => path.join(ROOT, p))
+
+/**
+ * 页面从哪棵树上找。默认就是本仓库；`--root=<别的目录>` 是给判据自己的测试用的
+ * （`test/pwa.test.js` 会把两份页面复制到临时目录里改坏一段，再要求 `--check` 报错）。
+ * ⚠️ 只影响**页面**的位置：manifest 的内容与指纹始终来自本目录的 `gen/pwa-assets.mjs`
+ * —— 那才是唯一真相，测试不该复制第二份。
+ */
+const rootArg = process.argv.slice(2).find((a) => a.startsWith('--root='))
+const PAGES_ROOT = rootArg ? path.resolve(rootArg.slice('--root='.length)) : ROOT
+const PAGES = ['web/receiver.html', 'web/station.html'].map((p) => path.join(PAGES_ROOT, p))
 
 const BEGIN = '<!-- pwa:begin —— 这一整段由 gen/inline-pwa.mjs 生成，请勿手改 -->'
 const END = '<!-- pwa:end -->'
@@ -155,7 +164,7 @@ const digest = sourceDigest()
 
 let drifted = 0
 for (const page of PAGES) {
-  const rel = path.relative(ROOT, page).replace(/\\/g, '/')
+  const rel = path.relative(PAGES_ROOT, page).replace(/\\/g, '/')
   if (!existsSync(page)) { console.log(`  － ${rel} 不存在，跳过`); continue }
   const html = readFileSync(page, 'utf8')
   const now = existingBlock(html)

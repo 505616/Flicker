@@ -68,3 +68,15 @@ test('反向验证脚本在仓库里（证明这条检查真的会失败）', ()
   assert.match(src, /writeFileSync\(target, mutated\)/, '反向验证脚本应当真的去改坏文档再跑检查')
   assert.match(src, /finally/, '必须用 try/finally 保证恢复原文，不能留下改坏的文档')
 })
+
+test('⭐ 反向验证：临时改坏文档后这条检查确实会失败（脚本自己恢复原文）', () => {
+  // 原来这里只断言"反向验证脚本在仓库里"，那等于把判据的作用托付给一段没人执行的代码：
+  // 脚本可以一直在、检查却退化成永远通过，用例照样绿。所以现在**真的跑一遍**。
+  // 脚本内部会改坏文档 → 跑检查（断言退出码非 0）→ 用 try/finally 恢复原文。
+  const r = spawnSync(process.execPath, [path.join(ROOT, '_lab', 'verify-send-protocol-doc-check.mjs')], {
+    cwd: ROOT, encoding: 'utf8', timeout: 120000,
+  })
+  assert.equal(r.status, 0,
+    `反向验证脚本应当通过（它内部断言"改坏之后检查会失败"）：\n${r.stdout}${r.stderr}`)
+  assert.match(r.stdout, /反向验证通过/)
+})
