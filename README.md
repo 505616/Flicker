@@ -235,6 +235,7 @@ This table says what's where (links go to the English copies):
 |---|---|
 | **[SECURITY.md](docs/SECURITY.md)** | **Threat model, crypto parameters, known weaknesses, verification checklist** |
 | [使用手册.md](docs/使用手册.md) | User manual: GUI walkthrough, CLI reference, troubleshooting |
+| [手机使用指南.md](docs/手机使用指南.md) | **The phone side**: what to tap in each of the three setups, how to handle the "not private" warning, what to check first |
 | [行为与运行.md](docs/行为与运行.md) | Runtime behaviour: startup sequence, destroy flow, what touches your system |
 | [设计文档.md](docs/设计文档.md) | Architecture, connection strategy, crypto scheme, and why |
 | [架构决策.md](docs/架构决策.md) | Why it's built this way, including rejected alternatives |

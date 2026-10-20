@@ -902,14 +902,14 @@ https://192.168.1.5:8443/?k=7f3a9c1e4b8d2a60
 接收页由 relay 托管，因此 `S` 必须**随链接**到达（**不能**放在 relay 的 URL path 或 query 里 —— 那会被 Worker 日志记录）：
 
 ```
-https://<relay>/#/7f3a9c1e4b8d2a60.<salt_hex_32>
+https://<relay>/#k=<房间名 64 hex>&s=<盐 32 hex>
               └─ URL fragment：浏览器不会把它发给服务器
 ```
 
 | URL 片段 | 含义 |
 |---|---|
-| `/` 后第一段（16 hex） | 一次性访问令牌 `token` |
-| `.` 之后（32 hex） | 盐 `S`（16 字节） |
+| `k`（64 hex） | 房间名 —— 由密码派生，中继靠它找到房间 |
+| `s`（32 hex） | 盐 `S`（16 字节） |
 
 > **为什么用 fragment 而不是 query**：URL fragment（`#` 之后）**永远不会出现在 HTTP 请求里**，因此不会进入 relay 的访问日志。这是把 `S` 和 `token` 送到浏览器的唯一安全通道。
 >

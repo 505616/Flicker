@@ -931,14 +931,14 @@ The receive page is hosted by the relay, so `S` must arrive **with the link** (*
 path or query —— that would be written to Worker logs):
 
 ```
-https://<relay>/#/7f3a9c1e4b8d2a60.<salt_hex_32>
+https://<relay>/#k=<room name 64 hex>&s=<salt 32 hex>
               └─ URL fragment: the browser does not send it to the server
 ```
 
 | URL fragment | Meaning |
 |---|---|
-| The first segment after `/` (16 hex) | The one-time access token `token` |
-| After the `.` (32 hex) | The salt `S` (16 bytes) |
+| `k` (64 hex) | The room name, derived from the password; the relay uses it to find the room |
+| `s` (32 hex) | The salt `S` (16 bytes) |
 
 > **Why a fragment rather than a query**: a URL fragment (after `#`) **never appears in the HTTP request**, so it does not enter the relay's access log. This is the only safe channel for getting `S` and `token` to the browser.
 >

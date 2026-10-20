@@ -28,11 +28,11 @@ export const ROOT = path.resolve(HERE, '..')
  */
 export const DEFAULT_FILES = [
   '读我.md', 'README.md',
-  '中文文档/SECURITY.md', '中文文档/使用手册.md', '中文文档/行为与运行.md',
+  '中文文档/SECURITY.md', '中文文档/使用手册.md', '中文文档/手机使用指南.md', '中文文档/行为与运行.md',
   '中文文档/设计文档.md', '中文文档/架构决策.md', '中文文档/PROTOCOL.md',
   '中文文档/中继部署.md', '中文文档/路线图.md', '中文文档/构建单文件.md',
   '中文文档/UI设计.md',
-  'docs/SECURITY.md', 'docs/使用手册.md', 'docs/行为与运行.md',
+  'docs/SECURITY.md', 'docs/使用手册.md', 'docs/手机使用指南.md', 'docs/行为与运行.md',
   'docs/设计文档.md', 'docs/架构决策.md', 'docs/PROTOCOL.md',
   'docs/中继部署.md', 'docs/路线图.md', 'docs/构建单文件.md',
   'docs/UI设计.md',
