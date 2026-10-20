@@ -59,7 +59,9 @@ export default {
     // 接收端页面由 page.generated.js 提供（构建产物，源自 web/receiver.html）。
     // 页面是单文件、零外部请求的，所以中继只需要回这一段 HTML。
     const pageHtml = async () => RECEIVER_HTML
+    // 网页发送端（手机传手机时两边都只有浏览器，只能由中继提供这一页）
+    const senderHtml = async () => SENDER_HTML
 
-    return handleRelay(request, url.pathname, store, { pageHtml })
+    return handleRelay(request, url.pathname, store, { pageHtml, senderHtml })
   },
 }

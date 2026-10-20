@@ -75,6 +75,24 @@ test('首页返回接收端页面', async () => {
   assert.match(r.headers.get('content-type') ?? '', /text\/html/)
 })
 
+test('/send 返回网页发送端（与接收页对称）', async () => {
+  const r = await handleRelay(new Request(BASE + '/send'), '/send', store, {
+    senderHtml: async () => '<!doctype html><h1>发送页</h1>',
+  })
+  assert.equal(r.status, 200)
+  assert.match(await r.text(), /发送页/)
+  assert.match(r.headers.get('content-type') ?? '', /text\/html/)
+  assert.equal(r.headers.get('cache-control'), 'no-store', '页面不该被缓存（换版本后要立刻生效）')
+})
+
+test('/send 没配置时返回 501 并说清怎么办（不假装能发）', async () => {
+  const r = await handleRelay(new Request(BASE + '/send'), '/send', store, {})
+  assert.equal(r.status, 501)
+  const text = await r.text()
+  assert.match(text, /没有配置网页发送端/)
+  assert.match(text, /flicker send --relay=/, '要告诉用户还有哪条路可走')
+})
+
 test('未知路径返回 404', async () => {
   assert.equal((await call('GET', '/nope')).status, 404)
   assert.equal((await call('GET', '/r/')).status, 404)

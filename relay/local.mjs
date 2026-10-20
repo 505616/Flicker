@@ -25,6 +25,7 @@ import { handleRelay } from '../src/relay/protocol.js'
 import { createPluginRegistry, pluginPaths } from '../src/plugin/registry.js'
 import { relayStoreFrom, describeStore } from '../src/plugin/relay-store.js'
 import { RECEIVER_HTML } from './page.generated.js'
+import { SENDER_HTML } from './sender.generated.js'
 
 const args = process.argv.slice(2)
 const portArg = args.find((a) => a.startsWith('--port='))
@@ -99,6 +100,7 @@ const server = createServer(async (req, res) => {
 
   const r = await handleRelay(relayReq, url.pathname, store, {
     pageHtml: async () => RECEIVER_HTML,
+    senderHtml: async () => SENDER_HTML,
     plugins,
   })
   const buf = Buffer.from(await r.arrayBuffer())

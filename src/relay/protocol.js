@@ -196,6 +196,25 @@ export async function handleRelay(request, pathname, store, opts = {}) {
     return json({ ...extra, ok: true, maxMessageBytes: store.maxMessageBytes, protocol: 1 }, 200)
   }
 
+  // ── /send：网页发送端 ──
+  //
+  // 手机传手机时两边都只有浏览器，"谁当服务端"无解 —— 只能由中继提供这一页。
+  // 与接收页同一条约束：页面自包含（构建期把内核内联进 HTML），中继只回一段 HTML。
+  if (pathname === '/send' || pathname === '/send/') {
+    if (!opts.senderHtml) {
+      return new Response('这个中继没有配置网页发送端（只提供接收）。\n' +
+        '用本机的 `flicker send --relay=…` 发送，或部署新版本的中继。\n', {
+        status: 501,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...CORS },
+      })
+    }
+    const html = await opts.senderHtml()
+    return new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS },
+    })
+  }
+
   // ── 首页：接收端页面 ──
   if (pathname === '/' || pathname === '/index.html') {
     if (!opts.pageHtml) {
