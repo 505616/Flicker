@@ -103,7 +103,7 @@ Give up any one of those four, and something else is probably less trouble.
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
 > Cross-network (relay) is **implemented and verified against a real relay**.
 
-**Tests: 808 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
+**Tests: 814 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
 deliberately **not** pinned here — every skipped case prints its own reason when the suite runs
 (this run: 1 locally, 5 in CI):
 

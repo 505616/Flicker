@@ -112,6 +112,11 @@ jobs:
       - name: 手机页协议内核内联段是最新的
         run: node gen/inline-phone.mjs --check
 
+      # 网页发送端（`web/sender.html`）也是构建期内联：phone-core（密码学）+ sender-core（中继续传）。
+      # 不同步 = 网页发送端跑的是旧逻辑 —— 而它没有 Node 那侧的测试兜底，只能靠这条守住。
+      - name: 网页发送端内联段是最新的
+        run: node gen/inline-sender.mjs --check
+
       # 三个页面共用的「字号调节」控件：一份实现（web/font-scale.js）内联进三处，
       # 这份生成器的 --check 守住"改了控件忘了重跑"。
       - name: 字号控件内联段是最新的
