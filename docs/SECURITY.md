@@ -53,6 +53,30 @@
 **Core assumption: the relay is completely untrusted.** It can record everything, it can tamper with everything, and it can stop serving at any time.
 The design of the encryption does not depend on it being honest.
 
+### 2.1 The sender has two forms (since 2026-10)
+
+In the diagram above the sender is "the Node program". Since 2026-10 the **sender can also be a
+relay-hosted web page** (`/send`), which is what makes phone-to-phone work — when both sides only have
+a browser there is no other way.
+
+| | Sender = local program | Sender = relay-hosted page |
+| --- | --- | --- |
+| Where plaintext and keys live | In memory on the user's own computer | In the browser tab's memory |
+| Whose code you must trust | The program you downloaded or built | **The page code the relay operator serves your browser** |
+| Can the relay see the content | No (ciphertext only) | No (ciphertext only) |
+| Does the key cross the network | No (the password stays on both ends) | No (room name and salt sit after `#`, which browsers never send) |
+
+⚠️ **That difference has to be stated plainly**: the web sender widens "the code you trust" from
+"the program on your machine" to "the HTML the relay hands your browser". When you deploy the relay
+yourself (the default usage of this project) those are the same party; with **someone else's** relay you
+are trusting their page code as well —— the same assumption the receiving page already carries, but one
+the sender did not previously depend on. The user manual says this explicitly, and anyone unwilling to
+accept it can keep sending with their own program only.
+
+Everything else is unchanged: the web sender also **encrypts before anything leaves the tab** (the same
+parameters as `src/suite/flicker1.js`, implemented in `web/phone-core.js` and byte-compared against it),
+so the relay still only ever sees ciphertext.
+
 ---
 
 ## 3. Cryptographic construction (exact parameters)
