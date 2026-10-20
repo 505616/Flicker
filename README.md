@@ -103,6 +103,34 @@ Give up any one of those four, and something else is probably less trouble.
 > single-file packaging, and the destroy-on-completion flow all work and are covered by tests.
 > Cross-network (relay) is **implemented and verified against a real relay**.
 
+### How far this has been tested (take the untested parts seriously)
+
+The automated tests and the documentation criteria are in place (below), but **some things a machine
+cannot stand in for**. They are listed honestly here, so "the code is written and it runs in a real
+browser" is not mistaken for "it has been verified on real phones":
+
+| Verified | How |
+| --- | --- |
+| LAN direct transfer (computer ↔ computer, computer ↔ phone page) | Automated tests + a real browser (`_lab/e2e-phone-browser.mjs`, `_lab/rehearsal-lan.mjs`) |
+| Cross-network relay (CLI sender → page receiver) | Automated tests + a real browser + a local relay (`_lab/e2e-relay-browser.mjs`) |
+| Web sender (page → relay → page, i.e. the phone-to-phone path) | Two tabs in a real browser + the two real relay artifacts (`_lab/e2e-page-to-page.mjs`), compared byte for byte |
+| Certificate trust, single-file artifact and the GUI on Windows | Real Windows hardware (the only platform with a device here) |
+
+| **Not verified** | Why |
+| --- | --- |
+| **Any complete flow on a real phone (Android / iPhone)** | No relay is available to test against right now, and there is no second phone; the phone page has only been driven in a desktop browser |
+| **Phone → phone** over a real Cloudflare relay | Same reason —— a relay has to be deployed first; this version is "written and verified against a local relay" |
+| The relay's `/send` route on the **live Worker** | Only exercised on the local relay (same protocol implementation); it has **never been deployed** |
+| Mobile networks, screen lock, backgrounding, large files on phones | Only a real device can tell |
+| macOS / Linux hardware, code signing, installing the PWA | No devices / no certificate |
+| The "which connection mode am I in" auto-detection hint | The logic is tested; the conclusion has not been re-checked on real networks |
+
+**In one sentence**: wherever the docs say "phone-to-phone is supported", the accurate meaning is
+**the code is complete and was verified byte for byte in a real browser (two tabs)** —— **not** "it has
+been verified on real phones". Real-device testing is still waiting for the conditions (see
+[`docs/路线图.md`](docs/路线图.md) item 7b); if what you see differs from the docs, please open an issue ——
+at this stage that is the most valuable information there is.
+
 **Tests: 816 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
 deliberately **not** pinned here — every skipped case prints its own reason when the suite runs
 (this run: 1 locally, 5 in CI):
