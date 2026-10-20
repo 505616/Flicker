@@ -127,9 +127,12 @@ test('hashFile 与 hashBuffer 对同一份内容给出完全相同的结果', as
   }
 })
 
-test('⭐ 服务端与中继客户端只做分块读，源码里不许出现 readFile(', () => {
+test('⭐ 服务端、中继客户端与中继核只做分块读，源码里不许出现 readFile(', () => {
   // 静态判据。它比动态判据更早、更准地指出问题出在哪一行。
-  for (const rel of ['src/server.js', 'src/relay/client.js']) {
+  // 2026-10：中继侧的公用核 `src/relay/core.js` 也算在内 ——
+  // 它现在同时被 Node 发送端与（将来的）网页发送端使用，
+  // "整文件读进内存"在这里同样不可接受。
+  for (const rel of ['src/server.js', 'src/relay/client.js', 'src/relay/core.js']) {
     const src = readFileSync(path.join(ROOT, rel), 'utf8')
     const hits = src.split('\n')
       .map((line, i) => ({ line, no: i + 1 }))

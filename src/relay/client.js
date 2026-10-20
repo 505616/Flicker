@@ -21,6 +21,12 @@
 import { open } from 'node:fs/promises'
 import { sealChunk, PARAMS } from '../suite/flicker1.js'
 import { packMessage, packBatch, MSG } from './protocol.js'
+import {
+  isTransientError, retryDelay, batchOutcome, relayLink,
+} from './core.js'
+
+// 兼容旧的 import 路径（`test/protocol-facts.test.js`、`test/relay-retry.test.js` 都从这里拿）
+export { isTransientError } from './core.js'
 
 /**
  * 被主动中止（用户点了取消、或程序要退出）。
@@ -33,36 +39,6 @@ export class RelayAborted extends Error {
     this.name = 'RelayAborted'
     this.code = 'ABORTED'
   }
-}
-
-/**
- * 判定一个错误值不值得重试。
- *
- * ⚠️ 只重试**瞬时**故障（网络抖动、超时、5xx、429）。
- *    其余一律不重试，因为重试也不会变好，只会拖长用户等待：
- *      NO_ROOM / EXPIRED / GONE → 房间真没了
- *      BAD_SEQ / TOO_LARGE / BAD_ROOM_ID / EMPTY_* → 请求本身有问题
- *      ABORTED → 用户点了取消
- *
- * 判断网络类错误靠 err.name / err.code（fetch 抛的是 TypeError("fetch failed")，
- * 其 cause 里可能是 ECONNRESET / ENOTFOUND / UND_ERR_* 等）。
- */
-export function isTransientError(e, status) {
-  // HTTP 层面：5xx 与 429 值得重试。
-  // ⚠️ 这一条**必须排在前面**：调用方可能直接用状态码问
-  //    （isTransientError(null, 503)），此时没有错误对象可查。
-  if (typeof status === 'number') return status >= 500 || status === 429
-  if (!e) return false
-  if (e.code === 'ABORTED' || e.name === 'RelayAborted') return false
-  // 协议层面：明确不可恢复的，不重试
-  const fatal = ['NO_ROOM', 'EXPIRED', 'GONE', 'NOT_YET', 'BAD_SEQ', 'BAD_ROOM_ID',
-    'TOO_LARGE', 'BAD_BODY', 'EMPTY_BODY', 'EMPTY_BATCH', 'BATCH_TOO_LARGE', 'BAD_BATCH']
-  if (typeof e.code === 'string' && fatal.includes(e.code)) return false
-  if (e.name === 'TimeoutError' || e.name === 'AbortError') return true
-  if (e.name === 'TypeError') return true                 // fetch 的网络层失败
-  const cause = e.cause?.code ?? e.cause?.name
-  if (typeof cause === 'string') return true              // ECONNRESET / UND_ERR_SOCKET …
-  return false
 }
 
 export class RelayClient {
@@ -162,8 +138,9 @@ export class RelayClient {
         lastErr = e
         if (!isTransientError(e, e.status)) throw e
         if (attempt === this.retries) break
-        // 300ms 起，每次翻倍，封顶 8s，再加 0–250ms 抖动
-        const backoff = Math.min(300 * 2 ** attempt, 8000)
+        // 300ms 起，每次翻倍，封顶 8s（公式在 core.js 里，网页端也是同一份），
+        // 再加 0–250ms 抖动
+        const backoff = retryDelay(attempt)
         const waitMs = backoff + Math.floor(Math.random() * 250)
         this.retryCount++
         this.onRetry({
@@ -442,11 +419,13 @@ export class RelayClient {
     let landed = null            // 上一次尝试"其实已经成功"时的状态读数
     try {
       const r = await this._withRetry('batch', async (attempt) => {
-        // 重试（attempt > 0）之前先确认上一次到底落库没有
+        // 重试（attempt > 0）之前先确认上一次到底落库没有。
+        // 判定规则在 core.js 的 batchOutcome（同一份逻辑，网页端也用它）
         if (attempt > 0 && !landed) {
           const st = await this.status().catch(() => null)
-          if (st && st.nextSeq === wantNext) { landed = st; return null }
-          if (st && st.nextSeq !== startSeq) {
+          const verdict = batchOutcome({ startSeq, wantNext, statusNextSeq: st?.nextSeq ?? null })
+          if (verdict === 'landed') { landed = st; return null }
+          if (verdict === 'desync') {
             const e = new Error(
               `投递序号错乱：期望 nextSeq=${startSeq}，服务端是 ${st.nextSeq}`)
             e.code = 'SEQ_DESYNC'
@@ -487,12 +466,8 @@ export class RelayClient {
     } catch { return false }
   }
 
-  /** 中继上的接收端页面地址（把它发给对方） */
+  /** 中继上的接收端页面地址（形状与规则的说明见 core.js 的 relayLink） */
   link(saltHex) {
-    // ⚠️ salt 放在 **fragment**（# 之后）里：
-    //    浏览器不会把 fragment 发给服务器，所以中继看不到 salt。
-    //    这不是洁癖 —— salt 参与密钥派生，泄露它虽然不能直接解密，
-    //    但会削弱"中继完全不知道对端在传什么"这个承诺。
-    return `${this.base}/#k=${this.room}&s=${saltHex}`
+    return relayLink({ base: this.base, room: this.room, saltHex })
   }
 }

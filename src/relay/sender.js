@@ -16,6 +16,7 @@
  * 中继上任何时刻只有少量在途密文。
  */
 import { RelayClient, RelayAborted } from './client.js'
+import { planWindow } from './core.js'
 import { PHASE } from '../session.js'
 
 export class RelaySender {
@@ -144,9 +145,16 @@ export class RelaySender {
       //       接收端一个都还没确认时，在途就已经是 windowSize 条，
       //       下一轮再叠一窗。实测窗口设 1，在途却有 5 条。
       //       窗口是**在途上限**，所以必须先看还差多少才满。
-      const startSeq = this.client.posted
-      const inFlight = startSeq - this.client.ackedBase
-      const room = Math.max(0, this.windowSize - inFlight)
+      // 窗口计算在 core.js 的 planWindow 里（网页发送端用的是同一份实现）。
+      // 规则与踩过的坑都写在那边；这里只拿结果。
+      const plan = planWindow({
+        total,
+        posted: this.client.posted,
+        ackedBase: this.client.ackedBase,
+        windowSize: this.windowSize,
+        idleRounds: this._idleRounds,
+      })
+      const { startSeq, room } = plan
 
       // ── 空位太少就**先不投**，去问状态 ────────────────────────
       //
@@ -160,8 +168,7 @@ export class RelaySender {
       //
       //    修法：空位不足半个窗口时，**宁可这个往返只问状态**，
       //    拿回新 ack 再投满窗。剩余量本来就不足半窗时（快传完了）照投。
-      const remaining = total - startSeq
-      const worthSending = room >= Math.max(1, Math.ceil(this.windowSize / 2)) || room >= remaining
+      //    （这条规则在 core.js 的 planWindow 里，`plan.send` 已经含了它）
       // 反停滞：连续空转若干轮就**强制转一圈**（下面会重新读一次状态）。
       //
       // ⚠️ 这里试过"强制投递时允许超出窗口 1 条"，**已撤销**。原因不是实现麻烦，
@@ -173,11 +180,14 @@ export class RelaySender {
       //        （中继上托管的页面没重新部署）。那种情况下正确的做法是
       //        **如实失败**并让用户重新部署/重传，而不是拿中继的内存去赌。
       //    所以窗口是硬上限，不超投；`_idleRounds` 只用来触发"再问一次状态"。
-      const forceSend = this._idleRounds >= 3
+      // ⚠️ 从前这里是 `forceSend = idleRounds >= 3` 然后照样进投递分支，
+      //    空位为 0 时 putBatch(startSeq, 0) 会返回 aborted → 外层 break →
+      //    整轮传输提前结束（注释说的是"强制读一次状态"）。现在 `plan.send`
+      //    要求 count > 0，空位为 0 时自然落到下面"问一次状态"的分支。
 
       let sentSomething = false
-      if ((worthSending || forceSend) && startSeq < total && !this._stopped) {
-        const count = Math.min(room, total - startSeq)
+      if (plan.send && !this._stopped) {
+        const count = plan.count
 
         // 限速：在**投递之前**按这一批的明文字节数取额度。
         // 放在这里而不是 putBatch 内部，是为了让"等待"发生在
