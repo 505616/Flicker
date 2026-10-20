@@ -4,12 +4,14 @@
  * 这条判据守的是"文档里写的参数，程序真的认吗"。它自己必须被反向验：
  *   · 真仓库必须过；
  *   · 参数表里写一个程序不认的参数 → 必须抓到（2026-10 实测就这样错了 5 个）；
- *   · 程序认的参数写在**别的章节**里 → 不许误报（判据只看参数参考那一章）；
+ *   · 整份手册里的参数都会扫（2026-10 起）：正文里写一个不存在的参数同样要抓到 ——
+ *     只守"参数表"等于只守了作者**记得放进表里**的那些（`--public` / `--lang` /
+ *     `--one-file` 三个都是漏在正文里的）；
  *   · 章节标题被改掉 → 必须报"找不到章节"（否则判据会悄悄变成空转）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,7 +40,7 @@ function zhManual(flags) {
     '',
     '## 五、接收文件',
     '',
-    '这里提到 `--connect` 说明程序不认的参数写在别的章节不算数。',
+    '这里提到 `--port` 只是示例，它确实存在。',
     '',
     '## 六、完整参数参考',
     '',
@@ -58,7 +60,7 @@ function enManual(flags) {
     '',
     '## 5. Receiving a file',
     '',
-    'Mentions `--connect` outside the reference section.',
+    'Mentions `--port` outside the reference section.',
     '',
     '## 6. Full option reference',
     '',
@@ -102,8 +104,10 @@ test('参数表里写了程序不认的参数 → 必须抓到，并指出是哪
   const dir = fakeRepo({ flags: [...['to', 'port', 'out'], 'nope'] })
   try {
     const { problems } = auditDocFlags(dir)
-    assert.equal(problems.length, 2, '中英两份都要报，实际：' + JSON.stringify(problems))
-    assert.ok(problems.every((p) => /--nope/.test(p) && /不认这个参数/.test(p)))
+    const table = problems.filter((p) => /参数表里写了 --nope/.test(p))
+    assert.equal(table.length, 2, '中英两份参数表各报一条，实际：' + JSON.stringify(problems))
+    assert.ok(problems.every((p) => /--nope/.test(p) && /不认这个参数/.test(p)),
+      '不该混进别的参数：' + JSON.stringify(problems))
     assert.ok(problems.some((p) => p.startsWith(DOCS[0])))
     assert.ok(problems.some((p) => p.startsWith(DOCS[1])))
   } finally {
@@ -111,10 +115,27 @@ test('参数表里写了程序不认的参数 → 必须抓到，并指出是哪
   }
 })
 
-test('别的章节里提到程序不认的参数 → 不许误报（判据只看参数参考那一章）', () => {
+test('正文里（不是参数表）写了不存在的参数 → 也必须抓到（`--public` 就是这么漏的）', () => {
   const dir = fakeRepo()
   try {
-    // fakeRepo 的"五、接收文件"章节里就写着 `--connect`，它不该被算进去
+    for (const rel of DOCS) {
+      const full = path.join(dir, rel)
+      const txt = readFileSync(full, 'utf8')
+      writeFileSync(full, txt.replace('## 五、接收文件', '## 五、接收文件\n\n有公网 IP 就加 `--public=1.2.3.4:8443`。')
+        .replace('## 5. Receiving a file', '## 5. Receiving a file\n\nWith a public IP, add `--public=1.2.3.4:8443`.'), 'utf8')
+    }
+    const problems = auditDocFlags(dir).problems
+    assert.equal(problems.length, 2, '中英两份都要报，实际：' + JSON.stringify(problems))
+    assert.ok(problems.every((p) => /--public/.test(p)))
+    assert.ok(problems.some((p) => /:\d+:/.test(p)), '要带行号，方便改：' + JSON.stringify(problems))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('正文里提到**存在**的参数 → 不许误报（例如 §五 里的 `--port`）', () => {
+  const dir = fakeRepo()
+  try {
     assert.deepEqual(auditDocFlags(dir).problems, [])
   } finally {
     rmSync(dir, { recursive: true, force: true })

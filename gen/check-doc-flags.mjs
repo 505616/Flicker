@@ -107,6 +107,18 @@ export function auditDocFlags(root = ROOT) {
       if (IGNORE.has(flag) || known.has(flag)) continue
       problems.push(`${rel}: 参数表里写了 --${flag}，但 ${CLI_REL} 不认这个参数`)
     }
+
+    // ── 整份手册都扫（2026-10 加）─────────────────────────────
+    // 只扫"参数参考"那一章曾经漏掉过三个**根本不存在的参数**，而且都写在正文里：
+    //   `--public=`（§三 说"有公网 IP 就不用中继"）、`--lang=en`（§4.3 说命令行换语言）、
+    //   `--one-file`（§8.4 说大文件分批发）。用户照着敲会得到"这不是一个参数"。
+    // 教训：只守"参数表"等于只守了作者**记得放进表里**的那些。
+    for (const m of txt.matchAll(/`--([a-z][\w-]*)/g)) {
+      const flag = m[1]
+      if (IGNORE.has(flag) || known.has(flag)) continue
+      const line = txt.slice(0, m.index).split('\n').length
+      problems.push(`${rel}:${line}: 正文里写了 --${flag}，但 ${CLI_REL} 不认这个参数`)
+    }
   }
 
   const undocumented = [...known].filter((f) => !['h', 'help', 'v', 'version', 'machine', 'machine-cert', 'plugin', 'plugins', 'dry-run'].includes(f))
