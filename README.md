@@ -3,6 +3,24 @@
 > One-shot file transfer — gone the moment it's done.
 > **The receiving side installs nothing.** Open a browser, type the password, get the files.
 
+> ### 🚫 **Not recommended for download yet** (2026-10-21)
+>
+> This is not yet a tool you should install and rely on. The reason is **not "the code is unfinished"**
+> —— it is **insufficient verification**:
+>
+> - **Every relay-related check ran against a relay on the local loopback** —— nothing was deployed to
+>   Cloudflare and nothing crossed the real internet;
+> - **Nothing has been tested on real phones** (no complete Android / iPhone flow has been run);
+> - The live Worker's `/send` (the sending page phone-to-phone uses) **has never been deployed**;
+> - macOS / Linux have no real-hardware verification, and there is no code signing.
+>
+> If you download it now, the most likely experience is "**it works inside one LAN, everything else is
+> unknown**". **When it will be OK to download**: after the three paths —— LAN, cross-network, and
+> phone-to-phone —— have each been run on real hardware (one Android, one iPhone) and against a properly
+> deployed relay, with the results written into the docs. See "How far this has been tested" below.
+> If you want to help, the most valuable thing right now is not downloading it, but **walking through
+> the phone guide once** and telling us what you see.
+
 > ### ⚠️ Read this before downloading: **verified on Windows only so far**
 >
 > Development and every measurement were done on **Windows 10/11 with Edge/Chrome**.
