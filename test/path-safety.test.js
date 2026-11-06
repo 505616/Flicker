@@ -114,6 +114,38 @@ test('R9/R10：非法字符与结尾的点、空格是**改写**而不是拒绝'
   assert.equal(checkRelPath('report.', { windows: false }), 'report.')
 })
 
+test('⭐ P1-17：先规范化再判保留名 —— `CON ` / `CON .txt` 不能漏过', () => {
+  // ⚠️ 旧实现的顺序是"先查保留名、后去掉结尾空格/点"：`CON ` 判定时还是 `CON `，
+  //    正则不匹配；之后被裁成 `CON` 放行 —— 而 `CON` 在 Windows 上根本创建不了。
+  //    `CON .txt` 同理：保留名看的是"第一个点之前、去掉结尾空格/点"的那一段。
+  for (const evil of ['CON ', 'CON .txt', 'con .txt', 'PRN .log', 'NUL .', 'COM1 .bin', 'aux .txt']) {
+    assert.throws(() => checkRelPath(evil, { windows: true }), (e) => e.rule === 'R8',
+      `应拒绝 Windows 保留名: ${JSON.stringify(evil)}`)
+  }
+  // 正常名字不能被误伤：只是**以保留名前缀开头**的不算保留名
+  for (const ok of ['console.txt', 'CONTRACT.md', 'concept .txt', 'COM10.log', 'lpt10.dat', 'null.txt']) {
+    assert.equal(checkRelPath(ok, { windows: true }), ok, `不应误伤: ${ok}`)
+  }
+  // 非 Windows 模式不管保留名（Linux 上 CON 是合法名字），也不能被新顺序影响
+  assert.equal(checkRelPath('CON ', { windows: false }), 'CON ')
+})
+
+test('⭐ P3-6：控制字符 0x01–0x1F 必须**明确拒绝**（不是静默改名）', () => {
+  // Windows 文件名里不允许控制字符。静默改写成 `a_b` 会让用户收到一个
+  // 自己没见过的名字，而且这种输入在 Linux 发送端是完全正常的文件名（P3-6）。
+  for (const evil of ['a\u0001b.txt', 'a\u001fb.txt', 'x\u0009y.txt', 'dir\u000bc/a.txt']) {
+    assert.throws(() => checkRelPath(evil, { windows: true }), (e) => {
+      assert.equal(e.rule, 'R9', `应报 R9（非法字符）: ${JSON.stringify(evil)}`)
+      assert.match(e.message, /控制字符/, '错误信息要说清是控制字符，用户才知道怎么改名')
+      return true
+    }, `应拒绝: ${JSON.stringify(evil)}`)
+  }
+  // NUL 仍然按 R6 处理（更早、更明确的那条规则）
+  assert.throws(() => checkRelPath('a\u0000b.txt', { windows: true }), (e) => e.rule === 'R6')
+  // 非 Windows：Linux 允许控制字符（NUL 除外），不能顺手把正常输入拒掉
+  assert.equal(checkRelPath('a\u0001b.txt', { windows: false }), 'a\u0001b.txt')
+})
+
 test('R11：反斜杠一律归一化成斜杠', () => {
   assert.equal(checkRelPath('dir\\sub\\a.txt'), 'dir/sub/a.txt')
   assert.equal(checkRelPath('a\\b/c.txt'), 'a/b/c.txt')

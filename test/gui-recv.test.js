@@ -307,3 +307,63 @@ test('图形界面：一次接收结束后可以「再来一次」（会话是�
   assert.notEqual(s2.password, first.password, '新会话要有新的一次性密码')
   await api('recv/stop', {})
 })
+// ── 本轮补的时序反向用例（P2-2 / P3-12）───────────────────────
+
+test('⭐ 接收服务"启动中"点停止：服务起来后立刻销毁，不会复活（P2-2）',
+  { timeout: 90000 }, async () => {
+  // 启动窗口期（生成证书要一两秒）里 recvLive 还是 null，从前 stopRecv 只把
+  // phase 改成 stopped 就返回；随后 startRecv 的 await 结束又把状态改回 waiting
+  // —— 服务、链接、证书其实都还在，用户以为停了。
+  const { inbox } = await workdir('gui-recv-abort')
+  const { api } = await bootGui()
+  const startP = api('recv/start', { dir: inbox })
+  // ⚠️ 不是每台机器都能从外部看见 starting：Windows 上证书生成是同步子进程调用，
+  //    整个事件循环被占住 —— 这期间**任何** HTTP 请求（包括页面上的"停止"按钮）
+  //    都只能排队。所以先尽力观察，观察不到就退回结构判据（见下）。
+  let sawStarting = false
+  try {
+    await waitRecv(api, (s) => s && s.phase === 'starting', { what: 'starting 阶段', ms: 5000 })
+    sawStarting = true
+  } catch { /* 这台机器看不到启动窗口期，下面用结构判据兜底 */ }
+  const stop = await api('recv/stop', {})
+  assert.equal(stop.status, 200)
+  const start = await startP
+  assert.equal(start.status, 200, start.text)
+  await waitRecv(api, (s) => s && s.phase === 'stopped', { what: '停止' })
+  // 再等一会儿：确认不会"复活"成 waiting（那等于停止按钮没生效）
+  await sleep(1200)
+  const st = (await api('state')).json.recv
+  assert.equal(st.phase, 'stopped',
+    `启动窗口期后不能复活成 waiting（实际 ${st.phase}）—— 那就等于"停止按钮没生效"`)
+  if (!sawStarting) {
+    // 看不到启动窗口期：至少钉住"意图被记下 + 服务起来后立刻销毁"这两段逻辑都在。
+    const src = await readFile(path.join(ROOT, 'src', 'gui.js'), 'utf8')
+    assert.match(src, /S\.recvAbort = true/, 'stopRecv 必须记下"要停"的意图（P2-2）')
+    assert.match(src, /if \(S\.recvAbort\) \{[\s\S]{0,240}service\.stop\(\)/,
+      '服务起来后必须检查这个意图并立刻销毁，而不是把状态改回 waiting')
+  }
+})
+
+test('⭐ 停止之后再直接开一轮：成功收完必须标成"完成"，不是"已停止"（P3-12）',
+  { timeout: 120000 }, async () => {
+  // UI 正常走「再来一次」（/api/recv/again 会重置 recvStopped）；但直接 POST
+  // /api/recv/start 时旧标志还留着 → 后台循环会把一次**成功**的接收标成 stopped。
+  const { inbox, phone } = await workdir('gui-recv-stopped-flag')
+  await writeFile(path.join(phone, 'a.txt'), 'hello')
+  const { api } = await bootGui(['--no-ask'])
+  await api('recv/start', { dir: inbox })
+  await waitRecv(api, (s) => s && s.phase === 'waiting', { what: '第一次等待' })
+  await api('recv/stop', {})
+  await waitRecv(api, (s) => s && s.phase === 'stopped', { what: '停止' })
+
+  // 不走 /api/recv/again —— 这正是 recvStopped 没被重置的那条路径
+  const again = await api('recv/start', { dir: inbox })
+  assert.equal(again.status, 200, again.text)
+  const waiting = await waitRecv(api, (s) => s && s.phase === 'waiting', { what: '第二次等待' })
+  const sim = await runSim({ url: waiting.url, password: waiting.password, srcDir: phone })
+  assert.equal(sim.code, 0, `手机侧应当成功：\n${sim.out}\n${sim.err}`)
+  const done = await waitRecv(api, (s) => s && (s.phase === 'done' || s.phase === 'error'),
+    { what: '接收完成' })
+  assert.equal(done.phase, 'done',
+    '成功收完必须显示"完成"—— 上一轮的停止标志不能把这一轮也标成"已停止"')
+})

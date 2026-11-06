@@ -135,6 +135,28 @@ test('连续取用：速率对得上（总量 ÷ 速率 = 总时长）', async (
     `稳态下 1 MB 在 100 KB/s 应约 10 秒，实际 ${clk.t}ms`)
 })
 
+test('⭐ 并发 take 不会超发：多个请求必须串行扣减（P2-4）', async () => {
+  // ⚠️ 这条用例复现的是**实测过的超发**：旧实现让每个等待者用同一份 tokens 并行
+  //    sleep，醒来后各自补令牌再扣减 —— 3 个并发 take(1000) 在 1000 B/s 下总共只
+  //    花了约 1 秒（等价于 2 秒的额度被一次放完），限速在并发下形同虚设。
+  //
+  //    正确的判据不是"看着变慢了"，而是**总耗时等于串行**：先花掉初始额度，
+  //    再让 3 个 1000 字节的请求并发进来，总共必须等约 3000ms。
+  const clk = fakeClock()
+  const lim = new RateLimiter(1000, { now: clk.now, sleep: clk.sleep })
+  await drainBurst(lim)                       // 清掉初始额度：剩下的才是稳态
+
+  const order = []
+  await Promise.all([0, 1, 2].map((i) => lim.take(1000).then(() => order.push(i))))
+
+  assert.deepEqual(order, [0, 1, 2], '排队必须按调用顺序（公平），不能后到先得')
+  assert.ok(clk.t >= 2900,
+    `3 个 1000 字节在 1000 B/s 下应等约 3000ms，实际 ${clk.t}ms —— 并发超发了`)
+  assert.ok(Math.abs(clk.t - 3000) <= 100, `应当正好 3000ms 左右，实际 ${clk.t}ms`)
+  assert.equal(lim.tokens, 0, '结束时令牌应当被扣干净（不能留下未记账的额度）')
+  assert.equal(lim.waitedMs, clk.t, '等待时长统计应当覆盖全部串行等待')
+})
+
 test('不限速时不引入任何等待', async () => {
   const clk = fakeClock()
   for (const spec of [0, -1, NaN, Infinity, undefined]) {

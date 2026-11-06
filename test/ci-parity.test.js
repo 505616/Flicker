@@ -21,6 +21,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compareCheckAndCi, ciCommands } from '../gen/check-ci-parity.mjs'
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const CHECK = path.join(ROOT, 'gen', 'check-ci-parity.mjs')
@@ -44,6 +45,31 @@ test('⭐ 反向验证：CI 漏掉一条本地判据 → 检查如实报错（�
   assert.match(r.stdout, /多了一条 CI 没有的判据.*如实报错/)
   assert.match(r.stdout, /steps 列表里混进了 job 级的键.*如实报错/)
   assert.match(r.stdout, /格式噪音.*正确地没有报错/)
+})
+
+test('⭐ 块式 `run: |` 里的命令也要被认出来（否则多行写法会被判成"CI 里没有"）', () => {
+  const pkgScript = 'node gen/check-a.mjs --check && node gen/check-b.mjs'
+  const ciText = [
+    'steps:',
+    '  - name: a（块式写法）',
+    '    run: |',
+    '      # 注释行不算命令',
+    '      node gen/check-a.mjs --check',
+    '',
+    '  - name: b（单行写法）',
+    '    run: node gen/check-b.mjs',
+  ].join('\n')
+  // 先证明解析器真的把块里的那一行吐出来了
+  assert.deepEqual(ciCommands(ciText), ['gen/check-a.mjs --check', 'gen/check-b.mjs'])
+  // 再证明比对结果：两条都在 → 不该报缺
+  const ok = compareCheckAndCi({ pkgScript, ciText })
+  assert.deepEqual(ok.missing, [], '块式写法里的判据被漏掉了：' + JSON.stringify(ok.missing))
+  // 反向：把块里的命令删掉 → 必须报缺（否则"修复"只是让解析器多吐了点东西）
+  const bad = compareCheckAndCi({
+    pkgScript,
+    ciText: ciText.replace('      node gen/check-a.mjs --check\n', ''),
+  })
+  assert.deepEqual(bad.missing, ['gen/check-a.mjs --check'])
 })
 
 test('这条判据自己也在 npm run check 与 CI 里（否则它也只在你机器上跑）', () => {

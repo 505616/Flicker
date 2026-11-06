@@ -18,7 +18,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { UNPACK_LIMITS, UnpackError, packForTest, unpackArchive, unpackToDir } from '../src/gift.js'
@@ -221,4 +221,80 @@ test('解包后的文件哈希与打包前一致（逐字节，不是"看起来�
   assert.equal(r.status, 0, r.stderr)
   const got = await readFile(path.join(work, 'o', 'deep', 'dir', 'file.txt'))
   assert.equal(createHash('sha256').update(got).digest('hex'), sha)
+})
+// ── ④ 这一轮补的反向用例（P2-7 / P2-8 / P3-5 / P3-9）──────────
+
+test('⭐ 赠品排除规则对**任意层级**生效（嵌套 node_modules / dist / .git 都不进包，P2-8）', async () => {
+  // 从前这四条排除项锚在根目录（/^node_modules\//）：只要有人在子目录跑过一次
+  // npm install，`relay/node_modules/` 就会整包发给对方（几十 MB 第三方代码，
+  // 还可能带上 .git/config 里的 remote URL）。判据必须覆盖嵌套层级。
+  const root = await tempDir()
+  const touch = async (rel) => {
+    const full = path.join(root, rel)
+    await mkdir(path.dirname(full), { recursive: true })
+    await writeFile(full, 'x')
+  }
+  await touch('keep.txt')
+  await touch('src/keep.js')
+  await touch('relay/node_modules/pkg/index.js')
+  await touch('sub/dist/bundle.js')
+  await touch('nested/.git/config')
+  await touch('a/_lab/out/log.txt')
+  await touch('src/flicker-plugin.log')
+  const { collectSourceFiles } = await import('../src/gift.js')
+  const rels = (await collectSourceFiles(root)).map((f) => f.rel).sort()
+  assert.deepEqual(rels, ['keep.txt', 'src/keep.js'],
+    `嵌套的依赖树/构建产物/版本库不该进赠品，实际收进了：${JSON.stringify(rels)}`)
+})
+
+test('⭐ 超大 .fkz：先看大小再读，不会整个读进内存（P2-7）', { timeout: 60000 }, async () => {
+  // 从前 CLI 先 readFile 整包、再在解析时检查上限 —— 4 GB 的坏包会先把进程撑爆。
+  // 现在入口先 stat；这里用稀疏文件造一个"超上限"的包（不真的写 1 GiB 数据）。
+  const work = await tempDir()
+  const big = path.join(work, 'huge.fkz')
+  const fh = await open(big, 'w')
+  try { await fh.truncate(UNPACK_LIMITS.maxTotalBytes + 1) } finally { await fh.close() }
+  const r = spawnSync(process.execPath, [CLI, 'unpack', big],
+    { cwd: ROOT, encoding: 'utf8', timeout: 30000 })
+  assert.equal(r.status, 2, `超大包应当按用法错误退出（2），而不是 OOM/崩溃：\n${r.stderr}`)
+  assert.match(r.stderr, /太大|上限/)
+  assert.equal(existsSync(big), true, '（文件仍在，清理交给 tempDir 的登记）')
+})
+
+test('⭐ 解包中途失败：目标目录里不留"解了一半"的文件（P3-9）', async () => {
+  // 先在目标旁边解到临时目录，全部写完才往目标里搬；搬的过程中失败就回滚。
+  // 这里故意制造"搬第二个文件时失败"：目标里 out/a 是个**文件**，而包要在 a/ 下建目录。
+  const dir = await tempDir()
+  const out = path.join(dir, 'out')
+  await mkdir(out, { recursive: true })
+  await writeFile(path.join(out, 'a'), 'blocker')
+  const bytes = pack([{ rel: 'z.txt', data: 'ok' }, { rel: 'a/b.txt', data: 'x' }])
+  await assert.rejects(() => unpackToDir(bytes, out, { force: true }), /.*/)
+  assert.deepEqual(await readdir(out), ['a'],
+    '失败后目标目录不该留着已经搬进去的 z.txt（那会让用户以为解开了）')
+  assert.deepEqual((await readdir(dir)).filter((n) => n.includes('.unpack-')), [],
+    '临时解包目录必须清掉，不能在用户目录里留垃圾')
+})
+
+test('CLI：`--` 之后的参数一律当路径（以 - 开头的文件也能解，P3-5）', { timeout: 60000 }, async () => {
+  // 没有 -- 结束符时，`-dash.fkz` 会被当成选项，用户永远解不开这种文件。
+  const work = await tempDir()
+  const fkz = path.join(work, '-dash.fkz')
+  await writeFile(fkz, pack([{ rel: 'a.txt', data: 'x' }]))
+  const r = spawnSync(process.execPath, [CLI, 'unpack', '--', '-dash.fkz'],
+    { cwd: work, encoding: 'utf8' })
+  assert.equal(r.status, 0, `-- 之后应当作为路径处理：\n${r.stderr}`)
+  assert.ok(existsSync(path.join(work, '-dash', 'a.txt')), '应当真的解到 -dash/ 目录')
+})
+
+test('CLI：unpack 下 --plugin 会明确告知"插件不生效"（P2-5，不静默）', async () => {
+  // 插件在 unpack 下永远不会收到事件。用户显式指定了它，就必须说一句，
+  // 否则屏幕上写着"已加载"、实际零效果 —— 插件作者会去查自己的 bug。
+  const work = await tempDir()
+  const plugin = path.join(work, 'p.cjs')
+  await writeFile(plugin, 'module.exports = { name: "p", apiVersion: 1, apply() {} }', 'utf8')
+  const r = spawnSync(process.execPath, [CLI, `--plugin=${plugin}`, 'unpack', path.join(work, 'none.fkz')],
+    { cwd: ROOT, encoding: 'utf8' })
+  assert.equal(r.status, 2)
+  assert.match(r.stderr, /插件不会生效/)
 })

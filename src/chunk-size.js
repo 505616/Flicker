@@ -96,18 +96,35 @@ export function chooseChunkBytes({ spec = { kind: 'auto' }, maxMessageBytes = nu
  * 或者根本不是 JSON —— 这两种情况都回落到协议保证的最小值，并标成 `legacy`，
  * 好让上层把"为什么这次用了 1 MiB"讲清楚。
  *
+ * ⚠️ 必须有超时：中继不可达时（域名被墙、防火墙丢包、服务没起）
+ *    fetch 可能挂到操作系统的 TCP 超时（几十秒到几分钟），而这一步在 CLI
+ *    **启动的最前面** —— 用户看到的是"程序卡住了"，不是"中继连不上"。
+ *
  * @param {string} baseUrl
  * @param {typeof fetch} [fetchImpl]
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs] 探测超时（默认 8 秒）
  * @returns {Promise<{maxMessageBytes:number, legacy:boolean, detail:string}>}
  */
-export async function fetchRelayCaps(baseUrl, fetchImpl = fetch) {
+export async function fetchRelayCaps(baseUrl, fetchImpl = fetch, opts = {}) {
   const legacy = {
     maxMessageBytes: PROTOCOL_MIN_MESSAGE_BYTES, legacy: true,
     detail: '中继没有声明单条上限（老版本），按协议最小值 1 MiB + 17',
   }
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : 8000
+  // 自己管定时器（而不是 AbortSignal.timeout）：
+  // 注入的 fetchImpl 可能是测试替身、不理会 signal —— 那样谁也不会清掉那个定时器。
+  // 这里在 finally 里 clearTimeout，且 unref，绝不拖住进程退出。
+  const ctrl = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort() }, timeoutMs)
+  timer.unref?.()
   try {
     const url = baseUrl.replace(/\/+$/, '') + '/health'
-    const r = await fetchImpl(url, { headers: { Accept: 'application/json' } })
+    const r = await fetchImpl(url, {
+      headers: { Accept: 'application/json' },
+      signal: ctrl.signal,
+    })
     if (!r.ok) return { ...legacy, detail: `中继的 /health 返回 ${r.status}，按协议最小值` }
     const text = await r.text()
     let j = null
@@ -115,7 +132,13 @@ export async function fetchRelayCaps(baseUrl, fetchImpl = fetch) {
     if (!j || !Number.isInteger(j.maxMessageBytes) || j.maxMessageBytes <= 0) return legacy
     return { maxMessageBytes: j.maxMessageBytes, legacy: false, detail: 'ok' }
   } catch (e) {
-    return { ...legacy, detail: `问不到中继的能力（${e?.message ?? e}），按协议最小值` }
+    // 超时给一句能指导排查的话：不是"未知错误"，而是"几秒内没响应"
+    const why = timedOut
+      ? `中继 ${timeoutMs / 1000} 秒内没有响应（/health 超时）`
+      : (e?.message ?? String(e))
+    return { ...legacy, detail: `问不到中继的能力（${why}），按协议最小值` }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

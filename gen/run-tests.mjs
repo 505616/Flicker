@@ -8,29 +8,30 @@
  * 这类"只在某个平台坏"的写法最容易漏，所以统一收进这个脚本：
  * 它在任何平台都用同样的方式工作，而且能自己打印实际跑的哪个文件列表。
  *
+ * ⚠️ **平台过滤的清单只有一处**：`gen/test-plan.mjs` 的 `plan()`（连同它的 `--check`）。
+ *    这个脚本以前自己藏着一份"4 个文件跳过"的清单，而 `--check` 审计的是另一份空表 ——
+ *    于是"审计通过"没在守任何东西：macOS/Linux 上 e2e 被静默跳过、CI 却全绿。
+ *    现在这里直接 import `plan()`，不再维护第二份（见 test-plan.mjs 顶部的记录）。
+ *
  * 用法：
- *   node gen/run-tests.mjs            # 本平台适用的全部测试
- *   node gen/run-tests.mjs --all      # 强制跑全部（含平台专属的，非 Windows 上会失败）
- *   node gen/run-tests.mjs --fast     # 只跑纯逻辑测试（秒级，不需证书）
- *   node gen/run-tests.mjs --dry      # 只打印将要执行的命令，不真跑
+ *   node gen/run-tests.mjs                # 本平台适用的全部测试
+ *   node gen/run-tests.mjs --all          # 强制跑全部（含平台专属的）
+ *   node gen/run-tests.mjs --fast         # 只跑纯逻辑测试（秒级，不需证书）
+ *   node gen/run-tests.mjs --parallel     # 同样按平台过滤，但并发跑（默认串行）
+ *   node gen/run-tests.mjs --dry          # 只打印将要执行的命令，不真跑
+ *   node gen/run-tests.mjs --update-docs  # 完整一轮之后，把用例数/失败数写回 README
  *
  * 额外参数会原样透传给 `node --test`。
  */
 import { spawn } from 'node:child_process'
-import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WINDOWS_ONLY, plan } from './test-plan.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const argv = process.argv.slice(2)
-
-const isWindows = process.platform === 'win32'
-
-/** 只在 Windows 上能跑的文件（证书机制仅 Windows 有实现，见 src/trust.js） */
-const WINDOWS_ONLY = new Set([
-  'trust.test.js', 'e2e.test.js', 'gui.test.js', 'startup-order.test.js',
-])
 
 /** 纯逻辑测试：不进程、不证书，任何平台都能跑，秒级 */
 const FAST = new Set([
@@ -43,15 +44,29 @@ const FAST = new Set([
   'handshake-downgrade.test.js', 'line-endings.test.js', 'doc-numbers.test.js', 'doc-paths.test.js', 'font-scale.test.js', 'qr.test.js',
 ])
 
-const all = readdirSync(path.join(ROOT, 'test'))
-  .filter((f) => f.endsWith('.test.js')).sort()
-
+/**
+ * 平台过滤的唯一真相：`gen/test-plan.mjs` 的 `plan()`。
+ * 这里只做"取结果"和"按 --fast/--all 再筛"，**不再**维护第二份平台清单。
+ */
+const planResult = plan()
+const all = planResult.all                        // 形如 'test/foo.test.js'
 let files
 if (argv.includes('--all')) files = all
-else if (argv.includes('--fast')) files = all.filter((f) => FAST.has(f))
-else files = isWindows ? all : all.filter((f) => !WINDOWS_ONLY.has(f))
+else if (argv.includes('--fast')) files = planResult.files.filter((f) => FAST.has(path.basename(f)))
+else files = planResult.files
 
-const passThrough = argv.filter((a) => !['--all', '--fast', '--dry'].includes(a))
+if (files.length === 0) {
+  // `node --test` 遇到"glob 零命中"会打印 `tests 0` 并**以 0 退出** ——
+  // 看起来像"通过"，其实是语法/目录写错了。这里把这种静默失败变成显式失败。
+  console.error('✗ 一个测试文件都没选中 —— `test/` 目录不在预期位置，或者过滤条件全落空。')
+  process.exit(1)
+}
+
+/** 本脚本自己的开关**不能**透传给 `node --test`（它不认识，会直接报错）。 */
+const OWN_FLAGS = ['--all', '--fast', '--dry', '--parallel', '--update-docs', '--no-sweep']
+const passThrough = argv.filter((a) => !OWN_FLAGS.includes(a))
+const parallel = argv.includes('--parallel')
+const updateDocs = argv.includes('--update-docs')
 
 /**
  * 每个用例的超时（默认 3 分钟）。
@@ -67,8 +82,13 @@ const defaultTimeout = userHasTimeout ? [] : ['--test-timeout=180000']
 
 // 注意：文件名逐个列出（不用 glob）—— 这样平台过滤的结果是**确定**的，
 // 不会因为 shell 展开 glob 的顺序或范围不同而意外包含被排除的文件。
-const args = ['--test', '--test-concurrency=1', ...defaultTimeout, ...passThrough,
-  ...files.map((f) => path.join('test', f))]
+// 默认串行（--test-concurrency=1）：套件里有真实端口/证书/进程的用例，并发会互扰；
+// --parallel 是显式的"我知道可能会互扰，但我想快一点"。
+const concurrency = parallel
+  ? String(Math.max(1, Math.min(4, availableParallelism())))
+  : '1'
+const args = ['--test', `--test-concurrency=${concurrency}`, ...defaultTimeout, ...passThrough,
+  ...files]
 
 /**
  * 额外挂一个 TAP reporter 写进临时文件。
@@ -84,25 +104,39 @@ const args = ['--test', '--test-concurrency=1', ...defaultTimeout, ...passThroug
  */
 const userHasReporter = passThrough.some((a) => a.startsWith('--test-reporter'))
 /**
- * 只有"本平台的完整一轮"才有资格和 README 对数字。
- * `--fast`、`--test-name-pattern`、非 Windows 上 `--all` 都会跑出另一套数字，
+ * 只有"完整一轮"才有资格和 README 对数字。
+ *
+ * `--fast` / `--all` / `--test-name-pattern` / `--test-only` 都会跑出另一套数字，
  * 拿它们去比只会天天误报 —— 而天天误报的检查等于没有检查。
+ * ⚠️ 2026-11 修正：`--all` 以前被漏掉了，注释却写着"非 Windows 上的 --all 会跑出另一套数字"，
+ *    代码里并没有排除它 —— 注释与实现不一致本身就是这个项目最忌讳的一类失败。
  */
-const isFullRun = !argv.includes('--fast') && files.length === all.length &&
+const isFullRun = !argv.includes('--fast') && !argv.includes('--all') &&
+  files.length === all.length &&
   !passThrough.some((a) => a.startsWith('--test-name-pattern') || a.startsWith('--test-only'))
 const tapFile = (userHasReporter || !isFullRun)
   ? null : path.join(tmpdir(), `flicker-tap-${process.pid}.tap`)
 if (tapFile) {
-  args.splice(2, 0, // 插在 --test --test-concurrency=1 之后、文件列表之前
+  args.splice(2, 0, // 插在 --test --test-concurrency=… 之后、文件列表之前
     '--test-reporter=spec', '--test-reporter-destination=stdout',
     '--test-reporter=tap', `--test-reporter-destination=${tapFile}`)
 }
 
-console.log(`平台 ${process.platform}：${files.length}/${all.length} 个测试文件`)
-if (files.length < all.length) {
-  const skipped = all.filter((f) => !files.includes(f))
-  console.log(`跳过（证书机制仅 Windows 有实现）：${skipped.join(', ')}`)
-  console.log('  这不是"跳过失败"，是明确的平台能力边界 —— 见 gen/test-plan.mjs 的说明')
+console.log(`平台 ${process.platform}：${files.length}/${all.length} 个测试文件` +
+  (parallel ? `（并发 ${concurrency}）` : '（串行）'))
+// ⚠️ 平台跳过要按 **planResult.skipped** 打印，不能按 "files.length < all.length" ——
+//    否则 `--fast` 少选的那些文件会被误报成"平台跳过"（2026-11 实测踩到）。
+if (planResult.skipped.length) {
+  console.log('跳过（清单在 gen/test-plan.mjs，每条都必须有 Windows 专属痕迹为证）：')
+  for (const f of planResult.skipped) {
+    console.log(`  － ${f}  ← ${WINDOWS_ONLY.get(f) ?? '（清单里没写理由 —— 这是 bug）'}`)
+  }
+}
+if (argv.includes('--fast')) {
+  console.log(`（--fast：只跑 ${files.length} 个纯逻辑测试文件，不是平台跳过）`)
+}
+if (updateDocs && !isFullRun) {
+  console.log('（--update-docs 只认完整一轮测试；本次不是完整一轮，不会写文档）')
 }
 
 /**
@@ -111,7 +145,8 @@ if (files.length < all.length) {
  * 为什么放在这里：测试与演练是我们往用户 `%TEMP%` 里写东西的主要来源，
  * 而"进程被强杀/删不掉"总会漏下几个。每跑一次测试顺手收一次，
  * 就不会像 2026-10 那样攒到 2.8 GB 才被用户发现（见 gen/tmp.mjs 顶部的记录）。
- * 只删我们自己前缀、且超过 1 小时的 —— 正在跑的会话（无论哪个进程）都不会被动到。
+ * 只删**我们自己的 `flicker-` 前缀**、且超过 1 小时的（可删前缀比可建前缀更窄，
+ * 见 gen/tmp.mjs 的 SWEEP_PREFIXES）—— 别的程序放在临时目录里的东西一律不碰。
  */
 if (!argv.includes('--no-sweep')) {
   try {
@@ -165,26 +200,37 @@ if (STALL_MS > 0) {
 
 child.on('exit', (code, signal) => {
   if (stallTimer) clearTimeout(stallTimer)
-  const exitCode = stalled ? 1 : signal ? 1 : (code ?? 0)
-  if (tapFile) { checkReadmeCounts(tapFile); rmSync(tapFile, { force: true }) }
+  let exitCode = stalled ? 1 : signal ? 1 : (code ?? 0)
+  if (tapFile) {
+    const stale = checkReadmeCounts(tapFile, { updateDocs })
+    // 数字过期而没加 --update-docs：默认**不写仓库**，但要让这次运行失败 ——
+    // 否则"测试绿 + 文档数字过期"会一直被当成全绿（CI 里 check-doc-numbers 排在测试之前，
+    // 它只看句式、看不到真实用例数，所以这一条必须由真正跑过测试的进程来兜底）。
+    if (stale && exitCode === 0) exitCode = 1
+    rmSync(tapFile, { force: true })
+  }
   process.exit(exitCode)
 })
 
 /**
- * 用刚跑出来的数字核对 README 里写的数字。**只警告，不让测试失败**。
+ * 用刚跑出来的数字核对 README 里写的数字。
  *
- * 为什么不让它失败：测试数量每加一条用例就变，让文档数字卡住 CI
- * 会逼着人把这个数字删掉 —— 那就从"过期"变成"没有"，更糟。
- * 警告直指该改哪一行，成本最低。
+ * ── 默认只读（2026-11 修正）──
+ * 从前这里**直接写回** README/读我.md。那让 `npm test` 有了仓库副作用：
+ * 跑一次测试工作区就脏了，还把一次运行的数字默默固化进文档（测试套件本该只读）。
+ * 现在默认只**报告 + 让本次运行失败**；真要写，显式加 `--update-docs`。
+ *
+ * 为什么"过期即失败"而不是"只警告"：2026-10 实测文档写 721 通过、实际 724，
+ * 好几天没人发现 —— 一句黄字在几百行输出里没人会看。让 CI 红才是判据。
+ *
+ * @returns {boolean} 是否有数字对不上（true = 过期；调用方据此决定退出码）
  */
-function checkReadmeCounts(file) {
-  // 这里**不再**因为 `FLICKER_NO_CERT_INSTALL=1` 早退：跳过改变"通过数"，但**不改**
-  // 用例总数与失败数，而这两项正是本判据唯一在比的东西 —— CI 上照样得成立。
+function checkReadmeCounts(file, { updateDocs = false } = {}) {
   let tap = ''
-  try { tap = readFileSync(file, 'utf8') } catch { return }
+  try { tap = readFileSync(file, 'utf8') } catch { return false }
   const num = (k) => Number((tap.match(new RegExp(`^# ${k} (\\d+)$`, 'm')) ?? [])[1])
   const tests = num('tests'), fail = num('fail')
-  if (!Number.isFinite(tests)) return       // 没拿到数字（reporter 变了）就安静跳过
+  if (!Number.isFinite(tests)) return false   // 没拿到数字（reporter 变了）就安静跳过
 
   // ⚠️ 只比 **用例总数** 与 **失败数**。跳过的条数是**环境属性**（有没有 git、能不能建
   //    符号链接、有没有 IPv6 回环、证书库要不要人点确认框……），同一份代码在不同机器上
@@ -197,21 +243,18 @@ function checkReadmeCounts(file) {
     ['README.md', /\*\*Tests: (\d+) cases, (\d+) failures?/],
   ]
 
-  // 对不上就**直接写回去**（而不是只警告）。理由：
-  //   · 现在只剩"用例总数"和"失败数"两个数，值来自刚跑完的 TAP，不是猜的；
-  //   · 只警告的话，实际结果是 —— 数字过期了但没人读那行提醒（2026-10 就这样：
-  //     文档写 721 通过 / 4 跳过，实测 724 通过 / 1 跳过，好几天没人发现）；
-  //   · 写回去的 diff 会在 `git status` 里露出来，比一句黄字显眼。
-  //
-  // ⚠️ **失败数不为 0 时一个字都不写**：文档里绝不能出现"788 个用例，2 失败"这种
-  //    被机器写上去的失败记录 —— 那等于把一次坏掉的运行固化进 README，而人只看到
-  //    "数字更新过了"。实测踩过：改坏判据的那一轮把 `失败数 0 → 2` 写了进去。
-  const changed = []
-  const missing = []
+  // ⚠️ **失败数不为 0 时一个字都不写、也不算数字过期**：文档里绝不能出现
+  //    "788 个用例，2 失败"这种被机器写上去的失败记录 —— 那等于把一次坏掉的运行
+  //    固化进 README。实测踩过：改坏判据的那一轮把 `失败数 0 → 2` 写了进去。
   if (fail > 0) {
-    console.log(`\n⚠️  这次有 ${fail} 条用例失败，**不**更新 README 里的测试现状（失败不该被写进文档）`)
+    console.log(`\n⚠️  这次有 ${fail} 条用例失败，**不**更新/核对 README 里的测试现状`)
+    return false
   }
-  for (const [f, re] of (fail > 0 ? [] : targets)) {
+
+  const changed = []
+  const stale = []
+  const missing = []
+  for (const [f, re] of targets) {
     const full = path.join(ROOT, f)
     const src = readFileSync(full, 'utf8')
     const m = src.match(re)
@@ -220,6 +263,7 @@ function checkReadmeCounts(file) {
     const bits = []
     if (Number(m[1]) !== tests) bits.push(`用例总数 ${m[1]} → ${tests}`)
     if (Number(m[2]) !== fail) bits.push(`失败数 ${m[2]} → ${fail}`)
+    if (!updateDocs) { stale.push(`${f}：${bits.join('、')}`); continue }
     const fixed = src.replace(re, (whole, a, b) => whole.replace(a, tests).replace(b, fail))
     writeFileSync(full, fixed, 'utf8')
     changed.push(`${f}：${bits.join('、')}`)
@@ -229,9 +273,18 @@ function checkReadmeCounts(file) {
     console.log(`\n⚠️  这几份 README 里找不到"测试现状"那一行（是不是改过写法？）：${missing.join(', ')}`)
     console.log('   （只是提醒，不影响测试结果 —— 但 npm run check 里的 check-doc-numbers 会失败）')
   }
+  if (stale.length) {
+    console.error('\n✗ README 里的测试数字已经过期（本次没有写盘）：')
+    for (const s of stale) console.error(`   ${s}`)
+    console.error('  改法：跑一次完整测试并加 --update-docs（它会写回上面这两行）：')
+    console.error('      node gen/run-tests.mjs --update-docs')
+    console.error('  或者手动把上面"→"右边的数字填进对应那一行。')
+    return true
+  }
   if (changed.length) {
-    console.log('\n✓ 已把这次跑出来的数字写回 README：')
+    console.log('\n✓ 已把这次跑出来的数字写回 README（--update-docs）：')
     for (const c of changed) console.log(`   ${c}`)
     console.log('   （这些改动记得一起提交；跳过条数刻意不写进文档，它随机器能力变化）')
   }
+  return false
 }

@@ -10,15 +10,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash, createHmac, randomBytes } from 'node:crypto'
+import { createHash, createHmac, randomBytes, webcrypto } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   chunkAAD, chunkIV, MANIFEST_AAD, PARAMS, receiverMac, senderMac, SUITE_ID,
+  deriveVerifier, deriveKeys as nodeDeriveKeys,
 } from '../src/suite/flicker1.js'
 
-import { registerRelayPageTests, codeOnly, extractSha256 } from './receiver-relay-tests.js'
+import { registerRelayPageTests, codeOnly, extractSha256, sliceFn } from './receiver-relay-tests.js'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const html = await readFile(path.join(root, 'web', 'receiver.html'), 'utf8')
@@ -196,7 +197,7 @@ test('⭐ 哈希的消息扩展暂存数组是复用的（不是每 64 字节新
 
 /** 从页面里抽出 ivFor 与 aadFor 的实现 */
 function extractDerivations() {
-  const iv = html.match(/const ivFor = \(chunkIndex\) => \{[\s\S]*?\n\};/)
+  const iv = html.match(/const ivFor = \(fileIndex, chunkIndex\) => \{[\s\S]*?\n\};/)
   const aad = html.match(/const aadFor = \(fileIndex, chunkIndex, totalChunks, plainLen\) => \{[\s\S]*?\n\};/)
   const ivm = html.match(/const MANIFEST_AAD = enc\.encode\('([^']+)'\);/)
   const lab = html.match(/const LABEL = \{ room: '([^']+)', auth: '([^']+)', enc: '([^']+)' \};/)
@@ -208,18 +209,35 @@ function extractDerivations() {
 
 const D = extractDerivations()
 
-test('ivFor 与服务端的 chunkIV 逐字节一致', () => {
-  for (const idx of [0, 1, 2, 255, 256, 65535, 1000000, 2 ** 32, 2 ** 40]) {
-    const a = Buffer.from(chunkIV(idx))
-    const b = Buffer.from(D.ivFor(idx))
-    assert.equal(Buffer.compare(a, b), 0, `块序号 ${idx} 的 IV 不一致`)
+test('ivFor 与服务端的 chunkIV 逐字节一致：BE32(fileIndex) ‖ BE64(chunkIndex)', () => {
+  for (const [fi, ci] of [
+    [0, 0], [0, 1], [1, 0], [7, 3], [255, 65535], [256, 256],
+    [1000000, 2], [2 ** 32, 2 ** 40], [2 ** 40, 2 ** 20],
+  ]) {
+    const a = Buffer.from(chunkIV(fi, ci))
+    const b = Buffer.from(D.ivFor(fi, ci))
+    assert.equal(Buffer.compare(a, b), 0, `IV 不一致：fileIndex=${fi} chunkIndex=${ci}`)
+    assert.equal(b.length, 12)
   }
 })
 
+test('⭐ 不同文件的同一块号 IV 必须不同（GCM nonce 复用会让密文泄露明文异或）', () => {
+  const hexOf = (b) => Buffer.from(b).toString('hex')
+  assert.notEqual(hexOf(D.ivFor(0, 0)), hexOf(D.ivFor(1, 0)),
+    '文件 0 与文件 1 的第 0 块 IV 相同 —— 同一把 keys.enc 下就是 nonce 复用')
+  assert.notEqual(hexOf(D.ivFor(0, 0)), hexOf(D.ivFor(0, 1)),
+    '同一文件的不同块 IV 相同')
+  // 同一坐标必须稳定（blob 加密与解密各算一次，必须逐字节一致）
+  assert.equal(hexOf(D.ivFor(5, 9)), hexOf(D.ivFor(5, 9)))
+  // 前 4 字节 = BE32(fileIndex)
+  assert.equal(Buffer.from(D.ivFor(0x01020304, 0)).subarray(0, 4).toString('hex'), '01020304')
+})
+
 test('ivFor 在大块序号下不因 32 位截断而出错', () => {
-  // JS 位运算会在 32 位处静默截断 —— 这里专门验证超过 2^32 的序号
+  // JS 位运算会在 32 位处静默截断 —— 这里专门验证超过 2^32 的块号
   const big = 2 ** 32 + 12345
-  assert.equal(Buffer.compare(Buffer.from(chunkIV(big)), Buffer.from(D.ivFor(big))), 0)
+  assert.equal(Buffer.compare(Buffer.from(chunkIV(0, big)), Buffer.from(D.ivFor(0, big))), 0)
+  assert.equal(D.ivFor(0xffffffff, 0)[3], 0xff, 'fileIndex 也要按 32 位完整写入')
 })
 
 test('aadFor 与服务端的 chunkAAD 逐字节一致（含大序号）', () => {
@@ -651,6 +669,194 @@ test('⭐ 拒绝写入权限：小文件给出警告，大文件明确失败（�
   const known = html.slice(html.indexOf('const KNOWN = ['), html.indexOf('const key = KNOWN.includes'))
   assert.ok(!/fatal:\s*true/.test(catchBlock),
     '这条错**不该**标成 fatal —— 用户点一次"允许"就能成功，要给重试按钮')
+})
+
+
+/**
+ * 切一个**可能带 async 的**页面函数。
+ * ⚠️ sliceFn 从 `function name(` 开始切，会丢掉前面的 `async ` ——
+ *    抽出来的源码里带着 await，直接 SyntaxError。这里把前缀补回去。
+ */
+function slicePageFn(name) {
+  const at = html.indexOf('function ' + name + '(')
+  assert.notEqual(at, -1, '页面里找不到 function ' + name)
+  const isAsync = html.slice(Math.max(0, at - 6), at) === 'async '
+  return (isAsync ? 'async ' : '') + sliceFn(html, name)
+}
+
+// ── P1-1：XSS（清单里的文件名进 innerHTML 之前必须转义）────────
+
+test('⭐ P1-1：escapeHtml 覆盖 & < > 引号五种字符，且不会被 undefined 变成字面量', () => {
+  const m = html.match(/function escapeHtml\(v\) \{[\s\S]*?\n\}/)
+  assert.ok(m, '未能定位 escapeHtml —— 页面结构变了？')
+  // eslint-disable-next-line no-new-func
+  const esc = new Function(m[0] + '\nreturn escapeHtml')()
+  assert.equal(esc('<img src=x onerror=alert(1)>.txt'),
+    '&lt;img src=x onerror=alert(1)&gt;.txt')
+  assert.equal(esc('a&"b\'c'), 'a&amp;&quot;b&#39;c')
+  assert.equal(esc('普通文件名.txt'), '普通文件名.txt')
+  assert.equal(esc(null), '', 'null/undefined 不能变成字面的 "undefined"')
+  assert.equal(esc(undefined), '')
+  // 反向：万一有人把它改成恒等函数，上面几条会挂；这里再显式确认它确实改了内容
+  assert.notEqual(esc('<b>'), '<b>')
+})
+
+test('⭐ P1-1：两条带清单文件名的错误路径都在抛出点转义', () => {
+  // 恶意发送方可以把文件名写成 `<img src=x onerror=…>.txt`：
+  //   · Windows 接收端用 `con.<img…>` 触发 R8 保留名
+  //   · macOS/Linux 接收端用两个只差大小写的名字触发重名冲突
+  // 两条都会把原始字符串塞进 err.params，而 fail() 用 innerHTML 渲染它们。
+  const vp = sliceFn(html, 'validatePaths')
+  assert.match(vp, /params: \{ name: escapeHtml\(f\.rel\)/, 'E_PATH_UNSAFE 的 {name} 必须转义')
+  assert.match(vp, /a: escapeHtml\(conflict\.paths\[0\]\)/, '重名冲突的 {a} 必须转义')
+  assert.match(vp, /b: escapeHtml\(conflict\.paths\[1\]\)/, '重名冲突的 {b} 必须转义')
+  // fail() 这边仍然是一句 t(key, err.params)：转义做在源头，不会被某条错误绕开
+  assert.match(html, /t\('recv\.err\.' \+ key \+ '\.m', \(err && err\.params\) \|\| \{\}\)/)
+})
+
+test('⭐ P1-1：UNKNOWN 分支只写 textContent，不把浏览器原文当 HTML 执行', () => {
+  const els = {}
+  const el = () => ({ textContent: null, innerHTML: null, classList: { add() {}, remove() {} } })
+  const get = (id) => els[id] || (els[id] = el())
+  const tStub = (k, vars) => 'MSG:' + k + (vars ? '|' + JSON.stringify(vars) : '')
+  // eslint-disable-next-line no-new-func
+  const fail = new Function('$', 'show', 't', 'releaseSecrets',
+    sliceFn(html, 'fail') + '\nreturn fail')(get, () => {}, tStub, () => {})
+
+  const evil = '<img src=x onerror=alert(1)>'
+  fail({ message: evil })
+  assert.equal(els['err-msg'].textContent, evil, 'UNKNOWN 的原始文字应原样进入 textContent')
+  assert.equal(els['err-msg'].innerHTML, null,
+    'UNKNOWN 分支绝不能写 innerHTML —— 那是浏览器/网络/JSON 给的原始文字')
+
+  // 已知错误走 innerHTML（文案表里的 <b> 是可信的），但参数已在源头转义
+  fail({ code: 'BAD_PASSWORD' })
+  assert.equal(typeof els['err-msg'].innerHTML, 'string', '已知错误应当用文案表里的模板')
+})
+
+// ── P1-2：目录写盘的同名冲突与 abort（不许静默覆盖、不许提交半截）──
+
+test('⭐ P1-2：目录写盘前先查同名并询问（换名/覆盖/跳过），失败用 abort 而不是 close', () => {
+  const open = slicePageFn('openSink')
+  assert.match(open, /askConflict\(/, '目录里已有同名文件时必须问用户')
+  assert.match(open, /uniqueNameInDir\(/, '"换名"要真的找一个没被占用的名字')
+  assert.match(open, /SKIP_FILE/, '"跳过"要有专门的错误码，让主循环能继续下一个文件')
+  assert.match(open, /NotFoundError/, '必须区分"不存在"与"存在/是目录"')
+  assert.match(open, /abort:/, '三条写盘路径都要提供 abort')
+  // 顺序：先无 create 地查名字，再 create 打开要写的那个
+  const iCheck = open.indexOf('getFileHandle(name)')
+  const iCreate = open.indexOf('getFileHandle(target, { create: true })')
+  assert.ok(iCheck > 0 && iCreate > iCheck,
+    '必须先查同名（getFileHandle(name) 不带 create）再打开目标 —— 反过来就是静默覆盖')
+
+  // 主循环：成功才 close()，失败/取消必须 abort()，否则流式写盘的 close 会提交半截内容
+  const recv = slicePageFn('receive')
+  assert.match(recv, /if \(ok\) await close\(\)/, '只有完整成功才 close 提交')
+  assert.match(recv, /abort/, '失败/取消路径必须 abort')
+  assert.match(recv, /SKIP_FILE/, '用户选择跳过时主循环要能接着处理下一个文件')
+})
+
+test('dedupeName：「名字 (n).ext」保留扩展名，没有扩展名也正确', () => {
+  const m = html.match(/function dedupeName\(name, n\) \{[\s\S]*?\n\}/)
+  assert.ok(m, '未能定位 dedupeName')
+  // eslint-disable-next-line no-new-func
+  const dedupe = new Function(m[0] + '\nreturn dedupeName')()
+  assert.equal(dedupe('照片.jpg', 1), '照片 (1).jpg')
+  assert.equal(dedupe('a.tar.gz', 2), 'a.tar (2).gz')
+  assert.equal(dedupe('noext', 3), 'noext (3)')
+  assert.equal(dedupe('.bashrc', 1), '.bashrc (1)')
+})
+
+// ── P2-6：目录写盘失败必须明确告警，不许静默退回内存拼装 ──────
+
+test('⭐ P2-6：目录句柄失败时给出可见告警（不是悄悄改成内存模式）', () => {
+  const open = slicePageFn('openSink')
+  assert.match(open, /warnDirFallback\(/, 'catch 里必须调告警函数，而不是空 catch')
+  const warn = sliceFn(html, 'warnDirFallback')
+  assert.match(warn, /dirFallbackWarn/, '告警文案要走 i18n')
+  assert.match(warn, /textContent/, '文件名来自清单，写告警时必须用 textContent（P1-1 同类）')
+  assert.doesNotMatch(open, /catch \{\s*\/\* 落到路径 B \*\/\s*\}/,
+    '原来那个"静默降级"的空 catch 必须消失')
+})
+
+// ── P1-4：中继模式密码错的提示 + 清单解密失败映射 ───────────────
+
+test('⭐ P1-4：中继模式用派生房间名校验密码，不一致时报可读的 BAD_PASSWORD', () => {
+  const relay = sliceFn(html, 'relayTransport')
+  assert.match(relay, /toHex\(keys\.room\) !== room/,
+    '没有握手的中继模式只能靠"派生的房间名 == 链接里的 k"判断密码')
+  assert.match(relay, /code: 'BAD_PASSWORD'/,
+    '密码不一致要报 BAD_PASSWORD（界面上才有"密码不一致 + 确认双方输入同一个密码"）')
+  // deriveKeys 必须把 room 带出来，否则上面那条永远不可能成立
+  assert.match(slicePageFn('deriveKeys'), /room: toHex/, 'deriveKeys 必须返回派生的房间名')
+  // 清单解不开时不能把裸 DOMException 丢到界面上
+  const start = slicePageFn('start')
+  assert.match(start, /DECRYPT_MANIFEST/, '清单解密失败要映射成可读错误码')
+  assert.match(html, /'DECRYPT_MANIFEST'/, '新错误码要进 KNOWN 列表')
+})
+
+test('deriveKeys 返回的 room 与 Node 派生的中继房间名逐字节一致', async () => {
+  const salt = randomBytes(PARAMS.saltBytes)
+  // eslint-disable-next-line no-new-func
+  const pageDerive = new Function('crypto', 'enc', 'LABEL', 'b64',
+    slicePageFn('deriveKeys') + '\n' + sliceFn(html, 'toHex') + '\nreturn deriveKeys')(
+    webcrypto,
+    new TextEncoder(),
+    { room: 'flicker/1/room', auth: 'flicker/1/auth', enc: 'flicker/1/enc' },
+    (s) => new Uint8Array(Buffer.from(String(s), 'base64')))
+  const keys = await pageDerive('k7m-3fq', {
+    salt: salt.toString('base64'),
+    kdf: { iterations: PARAMS.iterations },
+  })
+  const want = nodeDeriveKeys(deriveVerifier('k7m-3fq', salt))
+  assert.equal(keys.room, want.room.toString('hex'),
+    '页面派生的房间名与 Node 不一致 —— 中继链接里的 k 会对不上，密码永远被判错')
+  assert.ok(keys.auth && keys.enc, 'auth/enc 也必须是可用的 CryptoKey')
+})
+
+// ── P3-4 / P3-5 / P3-6 ─────────────────────────────────────────
+
+test('⭐ P3-4：错误与进度有无障碍语义（role=alert / aria-live / progressbar）', () => {
+  assert.match(html, /id="err-title" role="alert"/, '错误标题要有 role=alert')
+  assert.match(html, /id="go-state"[^>]*aria-live="polite"/, '传输状态要有 aria-live')
+  assert.match(html, /id="reconnect"[^>]*aria-live="polite"/, '重连提示要有 aria-live')
+  assert.match(html, /id="go-bar-wrap" role="progressbar"[^>]*aria-valuemin="0"[^>]*aria-valuenow="0"/,
+    '总进度条要有 progressbar 语义与读数')
+  assert.match(html, /id="cur-bar-wrap" role="progressbar"[^>]*aria-valuenow="0"/,
+    '单文件进度条要有 progressbar 语义与读数')
+  assert.match(sliceFn(html, 'paintProgress'), /aria-valuenow/,
+    '画进度时必须同步更新 aria-valuenow（只写死 0 等于没有读数）')
+})
+
+test('⭐ P3-5：完成/失败时真的释放密码与会话密钥引用', () => {
+  const pw = { value: 'top-secret-password' }
+  const secret = {
+    keys: { room: 'r'.repeat(64), auth: {}, enc: {} },
+    manifest: { files: [{ rel: 'a.jpg' }] },
+    info: {},
+    transport: {},
+  }
+  // eslint-disable-next-line no-new-func
+  const out = new Function('$', 'S', 's',
+    sliceFn(html, 'releaseSecrets') + '\nreleaseSecrets(); return { S: S, pw: $("pw").value, s: s }')(
+    () => pw, secret, secret)
+  assert.equal(out.S, null, 'releaseSecrets 之后 S 必须置空')
+  assert.equal(out.pw, '', '密码输入框必须清空 —— 否则页面停留期间还能被读到明文')
+  assert.equal(out.s.manifest, null, '明文清单引用必须丢掉')
+  assert.equal(out.s.keys.auth, null, 'auth 密钥引用必须置空')
+  assert.equal(out.s.keys.enc, null, 'enc 密钥引用必须置空')
+  assert.equal(out.s.transport, null, '传输层引用必须丢掉')
+  // 两个收尾出口都要调用它
+  assert.match(sliceFn(html, 'finished'), /releaseSecrets\(\)/, '完成/取消时必须释放')
+  assert.match(sliceFn(html, 'fail'), /releaseSecrets\(\)/, '失败时也必须释放')
+})
+
+test('⭐ P3-6：beacon 只在局域网模式发（中继上没有 /api/done）', () => {
+  const finished = sliceFn(html, 'finished')
+  assert.match(finished, /mode === 'local'/, 'sendBeacon 必须按传输模式判断')
+  assert.match(finished, /encodeURIComponent\(sid\)/, '要用释放前抓下来的 sid，不是 S.sid')
+  assert.doesNotMatch(finished, /sendBeacon\('\/api\/done\?sid=' \+ encodeURIComponent\(S\.sid\)\)/,
+    '中继模式下打 /api/done 只会得到 404 噪声')
 })
 
 test('⭐ 中继发出的页面与 web/receiver.html 是同一份（不许悄悄变成旧版）', async () => {

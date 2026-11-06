@@ -204,9 +204,21 @@ if (MANIFEST_AAD.length === 28) {
   throw new Error('清单 AAD 与数据块 AAD 长度相同，会引入歧义 —— 请修改标签')
 }
 
-/** 每块的 IV = 12 字节，前 4 字节为 0，后 8 字节为块序号（保证同文件内不重复） */
-export function chunkIV(chunkIndex) {
+/**
+ * 每块的 IV = 12 字节：BE32(fileIndex) || BE64(chunkIndex)。
+ *
+ * ⚠️ 前 4 字节**必须**是文件序号，不能是 0。整个会话共用一把 `keys.enc`，
+ *    而一张清单里通常有多个文件 —— 如果 IV 只由"文件内块号"决定，
+ *    文件 0 的第 0 块与文件 1 的第 0 块就会用同一个 GCM nonce：
+ *    C_A ⊕ C_B = P_A ⊕ P_B（明文异或泄露），还能做 forbidden attack 恢复认证密钥。
+ *    文档里"IV 复用即灾难性失效"说的就是这条，属于 P0。
+ *
+ * ⚠️ 必须用 writeUInt32BE（不是 64 位）写文件序号：网页端与中继页面用
+ *    `dv.setUint32(0, fileIndex)`，两侧必须**逐字节**一致，否则老页面解不开新服务端的块。
+ */
+export function chunkIV(fileIndex, chunkIndex) {
   const iv = Buffer.alloc(PARAMS.ivBytes)
+  iv.writeUInt32BE(Number(fileIndex) >>> 0, 0)
   iv.writeBigUInt64BE(BigInt(chunkIndex), 4)
   return iv
 }
@@ -218,7 +230,7 @@ export function chunkIV(chunkIndex) {
  * @returns {{ct:Buffer, tag:Buffer}} ct 为密文，tag 为 16 字节认证标签
  */
 export function sealChunk(encKey, fileIndex, chunkIndex, totalChunks, plain) {
-  const iv = chunkIV(chunkIndex)
+  const iv = chunkIV(fileIndex, chunkIndex)
   const aad = chunkAAD(fileIndex, chunkIndex, totalChunks, plain.length)
   const c = createCipheriv(PARAMS.aead, encKey, iv, { authTagLength: PARAMS.tagBytes })
   c.setAAD(aad)
@@ -230,7 +242,7 @@ export function sealChunk(encKey, fileIndex, chunkIndex, totalChunks, plain) {
  * 解密一块。任何篡改、乱序、跨文件拼接都会在这里抛错 —— 这是设计目标。
  */
 export function openChunk(encKey, fileIndex, chunkIndex, totalChunks, ct, tag, plainLen) {
-  const iv = chunkIV(chunkIndex)
+  const iv = chunkIV(fileIndex, chunkIndex)
   const aad = chunkAAD(fileIndex, chunkIndex, totalChunks, plainLen)
   const d = createDecipheriv(PARAMS.aead, encKey, iv, { authTagLength: PARAMS.tagBytes })
   d.setAAD(aad)
@@ -272,11 +284,50 @@ export function newToken(bytes = 16) {
   return randomBytes(bytes).toString('base64url')
 }
 
-/** 人类可读的随机密码：4 个单词，好念好打（见 UI设计.md §3.3） */
-const WORDS = ('correct horse battery staple dolphin lantern meadow copper ' +
-  'velvet canyon orbit pebble thistle marble walnut cactus ember fable ' +
-  'ginger harbor indigo jigsaw kettle lagoon mitten nectar oyster ' +
-  'puzzle quiver rabbit saddle timber urchin violet willow yonder zephyr').trim().split(/\s+/)
+/**
+ * 人类可读的随机密码：4 个单词，好念好打（见 UI设计.md §3.3）。
+ *
+ * ⚠️ 词表大小直接等于每词熵：`log2(WORDS.length)` bit。之前只有 37 个词
+ *    → 每词约 5.2 bit，4 词 ≈ **20.8 bit**，对"离线拿到盐+清单后爆破"来说太弱
+ *    （见 P1-3）。这里扩到 **256 个词 = 每词 8 bit，4 词 = 32 bit**；
+ *    UX 不变（仍是 4 个短词 + 短横线），手机端短码 `suggestCode` 不受影响。
+ *    256 恰好整除 256，下面的拒绝采样自然退化为一次取值，也没有模偏差。
+ */
+const WORD_LIST =
+  'acorn anchor apple arrow atlas badge bagel bamboo ' +
+  'banjo basil basket beetle bishop bison blanket blossom ' +
+  'boat bonus boulder boxer brass bread brick broom ' +
+  'bubble buffalo bugle butter button cable cactus candle ' +
+  'candy canvas carbon cargo carrot castle chalk cherry ' +
+  'chicken chilled cinnamon circle clam cliff cloud coast ' +
+  'cocoa copper coral corner cotton counter coyote crane ' +
+  'crayon creek crimson crown cube cupcake cycle daisy ' +
+  'dandelion dawn denim diamond diesel dish dolphin donut ' +
+  'dragon drum eagle easel ebony eclipse engine enjoy ' +
+  'essay falcon farmer feather ferry fiddle fig finch ' +
+  'flag flute foam fossil fountain frost fruit garden ' +
+  'garlic ginger glacier glove goose gown grape grass ' +
+  'grove guitar hammer harbor hazel heart helmet honey ' +
+  'horizon hotel hunter igloo indigo insect island jacket ' +
+  'jade jar jelly jet jigsaw journal juniper kettle ' +
+  'knight koala lagoon lake lantern lemon leopard lever ' +
+  'lily linen lion lobster lodge lumber lunar magnet ' +
+  'mango marble meadow melon meteor mint mitten moose ' +
+  'mound mountain music nectar nickel noble north oak ' +
+  'oasis olive onion orange orchid otter owl paddle ' +
+  'paper parrot peanut pear pelican pepper piano picnic ' +
+  'pine planet pocket pond poppy prairie prism puzzle ' +
+  'quail quiver rabbit raft raven ribbon ridge river ' +
+  'rocket rope ruby saddle salmon sand scarf scorpion ' +
+  'seed shell shore silver skate sky sled smoke ' +
+  'snail soap sock solar spider spring squash squid ' +
+  'star steam stone storm stream summit sunflower swan ' +
+  'sweet table taco talon tea tent thistle tiger ' +
+  'timber tomato toucan tower train tulip turtle twig ' +
+  'valley vanilla vessel violin walnut whale wheat willow ' +
+  'wind winter wolf wren yarrow zebra zephyr zipper'
+
+export const WORDS = Object.freeze(WORD_LIST.trim().split(/\s+/))
 
 export function suggestPassword(words = 4) {
   const out = []

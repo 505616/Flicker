@@ -16,7 +16,7 @@ import { installFromDisk, version, ASSET, assetFingerprint, recordedAssetDigests
   from '../src/assets.js'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
 // ⚠️ 这几个**必须是静态 import**，不能写成 `await import('../src/gui.js')`。
@@ -30,7 +30,7 @@ import { existsSync } from 'node:fs'
 //
 //    这条坑的判据现在有三道：打包器见到相对路径的动态 import 直接**拒绝构建**、
 //    冒烟必须把产物**复制到源码树之外**再跑、`test/startup-order.test.js` 盯着模块图。
-import { runGui } from '../src/gui.js'
+import { openUrl, runGui } from '../src/gui.js'
 import { runSend } from '../src/run.js'
 import { runSendViaRelay } from '../src/relay/run-relay.js'
 
@@ -78,10 +78,10 @@ if (!globalThis.__flickerRoot) {
 import { EXIT } from '../src/destroy.js'
 import { RateLimiter, parseRate } from '../src/rate.js'
 import { parseChunkSpec } from '../src/chunk-size.js'
-import { sourcePackFingerprint, SOURCE_PACK_ASSET, unpackToDir } from '../src/gift.js'
+import { sourcePackFingerprint, SOURCE_PACK_ASSET, UNPACK_LIMITS, unpackToDir } from '../src/gift.js'
 import { runRecv, defaultSaveDir } from '../src/recv.js'
 import { matchFingerprint, parseRecvLink, probePeer, pullFromLink } from '../src/pull.js'
-import { tty } from '../src/tty.js'
+import { parseDuration, tty, UsageError } from '../src/tty.js'
 import { createPluginRegistry, pluginPaths } from '../src/plugin/registry.js'
 
 const USAGE = `
@@ -132,6 +132,7 @@ const USAGE = `
     --no-qr             不显示二维码
     --no-color          不使用颜色
     --dry-run           只列出要发送的清单，不启动传输
+    --                  之后的内容一律当作路径（发送以 - 开头的文件名时用）
 
   插件（可选，详见 docs/插件.md）
     --plugin=<路径>     加载一个插件，可重复给多次
@@ -156,34 +157,68 @@ const USAGE = `
   文档：读我.md（中文）/ README.md（English）· 中文文档/ · docs/
 `
 
-/** 解析 --key=value / --flag 两种形式 */
+/** 允许重复给的选项（只有插件是有意的多值） */
+const MULTI_VALUE_FLAGS = new Set(['plugin'])
+
+/** 必须带值的长选项（写成裸选项时要报错，而不是 Number(true)=1） */
+const VALUE_FLAGS = new Set([
+  'password', 'dir', 'fingerprint', 'relay', 'chunk', 'window', 'rate', 'port', 'bind',
+  'timeout', 'max-files', 'max-bytes', 'machine-cert', 'plugin',
+])
+
+/** 图形界面下不生效的选项（必须明确提示，不能静默忽略 —— 见 warnIgnoredGuiFlags） */
+const GUI_IGNORED_FLAGS = ['port', 'bind', 'relay', 'chunk', 'window', 'machine', 'dry-run']
+
+/**
+ * 解析 --key=value / --flag 两种形式。
+ *
+ * ⚠️ 三条硬约束，每条都对应一次实测事故：
+ *   · `--` 之后一律当作位置参数 —— 否则以 `-` 开头的文件名永远发不出去；
+ *   · 同一个**带值**选项给两次 → 报错。从前重复项会被收成数组，而消费点全是
+ *     `typeof flags.X === 'string'`，数组一路落空 → 用户明确指定的 --dir / --password
+ *     被静默丢掉（文件存到了默认目录，还没人知道）；
+ *   · 裸的带值选项 → 报错。`Number(true)` 是 1：`--max-bytes` 会变成"最多收 1 字节"。
+ */
 function parseArgs(argv) {
   const flags = {}, positional = []
+  let literal = false
   for (const a of argv) {
-    if (a.startsWith('--') || a.startsWith('-')) {
+    if (!literal && a === '--') { literal = true; continue }
+    if (!literal && (a.startsWith('--') || a.startsWith('-'))) {
       const body = a.replace(/^-+/, '')
       const eq = body.indexOf('=')
       if (eq >= 0) {
         const k = body.slice(0, eq), v = body.slice(eq + 1)
-        // 同一个选项给多次 → 收成数组（`--plugin=a --plugin=b`）。
-        // 单个时仍然是字符串，所以现有调用方一个字都不用改。
-        if (k in flags) flags[k] = Array.isArray(flags[k]) ? [...flags[k], v] : [flags[k], v]
-        else flags[k] = v
-      } else flags[body] = true
+        if (k in flags) {
+          if (!MULTI_VALUE_FLAGS.has(k)) {
+            throw new UsageError(`--${k} 给了不止一次（同一个选项只允许给一次）`)
+          }
+          flags[k] = Array.isArray(flags[k]) ? [...flags[k], v] : [flags[k], v]
+        } else flags[k] = v
+      } else {
+        if (VALUE_FLAGS.has(body)) {
+          throw new UsageError(`--${body} 后面要跟值（写成 --${body}=…）`)
+        }
+        flags[body] = true
+      }
     } else positional.push(a)
   }
   return { flags, positional }
 }
 
-/** 解析时长：30s / 10m / 2h */
-function parseDuration(s, fallbackMs) {
-  if (s === undefined || s === true) return fallbackMs
-  const m = String(s).match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i)
-  if (!m) throw new Error(`看不懂的时长: ${s}（应为 30s / 10m / 2h）`)
-  const n = Number(m[1])
-  const unit = (m[2] ?? 'm').toLowerCase()
-  const mult = { ms: 1, s: 1000, m: 60000, h: 3600000 }[unit]
-  return Math.round(n * mult)
+/**
+ * 图形界面下**不生效**的选项：明确说一句，不打断。
+ *
+ * 为什么必须说：`flicker --port=8443 --relay=…` 从前会安静地打开界面，再用随机端口、
+ * 局域网直连 —— 用户以为限定了端口/走了中继，实际没有；`--relay` 被忽略时对方可能
+ * 根本连不上，而屏幕上没有任何线索。项目规矩是"不允许静默失效"，这里也一样。
+ */
+function warnIgnoredGuiFlags(flags) {
+  const hit = GUI_IGNORED_FLAGS.filter((k) => flags[k] !== undefined)
+  if (!hit.length) return
+  process.stderr.write(
+    `  ! 图形界面下这些选项不生效：${hit.map((k) => '--' + k).join('、')}\n` +
+    '    它们只对命令行（flicker send / flicker recv）有效；界面里用的是随机端口与局域网直连。\n')
 }
 
 async function main() {
@@ -277,6 +312,17 @@ async function main() {
           `  副作用: ${p.effects} 个\n      ${p.file}`).join('\n') + '\n'
       : '  （没有加载任何插件：用 --plugin=<路径> 或 FLICKER_PLUGINS 指定）\n')
     return EXIT.OK
+  }
+
+  // ── 插件在哪些命令下**永远不会生效** ─────────────────────
+  // `recv <链接>` 走的是 pull 链路（src/pull.js 不发任何插件事件），`unpack` 根本不是
+  // 传输 —— 这两条命令接受 --plugin 却永远收不到事件。用户显式指定了插件、屏幕上还写着
+  // "已加载"，实际零效果，这是项目最忌讳的静默失效。明确说一句，别让他去查自己的插件。
+  if (plugins?.count && (
+    ((cmd === 'recv' || cmd === 'receive') && positional[1] !== undefined) || cmd === 'unpack'
+  )) {
+    process.stderr.write(
+      '  ! 该命令下插件不会生效（--plugin 只在发送与接收服务两种模式下触发事件）\n')
   }
 
   // ── 接收：不带链接 = 起一个接收服务（手机往这台电脑发）；带链接 = 老行为（打开浏览器）──
@@ -440,6 +486,23 @@ async function main() {
       process.stderr.write('  ✗ 给一个 .fkz 文件的路径：flicker unpack <文件.fkz> [--dir=目录] [--force]\n')
       return EXIT.USAGE
     }
+    // ⚠️ 先 stat 再读：上限检查从前在**解析时**才做，而 readFile 已经把整个包
+    //    读进内存了 —— 对方给一个 4 GB 的坏包，进程先 OOM 崩掉，根本没机会
+    //    报"太大了"。正常源码包只有几 MB，所以先在门外把大小挡掉。
+    let st
+    try { st = await stat(file) } catch (e) {
+      process.stderr.write(`  ✗ 读不到 ${file}：${e?.code === 'ENOENT' ? '文件不存在' : (e?.message ?? e)}\n`)
+      return EXIT.USAGE
+    }
+    if (!st.isFile()) {
+      process.stderr.write(`  ✗ ${file} 不是一个普通文件\n`)
+      return EXIT.USAGE
+    }
+    if (st.size > UNPACK_LIMITS.maxTotalBytes) {
+      process.stderr.write(`  ✗ 这个包太大了：${st.size} 字节（上限 ${UNPACK_LIMITS.maxTotalBytes}）\n` +
+        '    正常源码包只有几 MB —— 这个文件可能坏了，或者根本不是 .fkz\n')
+      return EXIT.USAGE
+    }
     let buf
     try {
       buf = await readFile(file)
@@ -482,7 +545,19 @@ async function main() {
     // 挂到发送流程上，并把插件的日志改道进界面的日志面板（见 gui.js 的 setLog）。
     // ⚠️ 从前这里是"明确拒绝" —— 因为界面进程不解析 `--plugin`，悄悄忽略会让用户
     //    以为插件生效了。现在改成真的支持，而不是换个地方假装。
-    return runGui({ flags, plugins })
+    // ⚠️ --timeout 必须走**同一份**解析（从前 GUI 里是 Number('30m') = NaN，
+    //    而 `NaN ?? 默认值` 仍是 NaN，setTimeout(NaN) 按 1ms 触发 ——
+    //    用户按文档加了 --timeout=30m，链接刚出现会话就"超时"销毁了）。
+    let guiTimeoutMs = null
+    if (flags.timeout !== undefined) {
+      try { guiTimeoutMs = parseDuration(flags.timeout, 10 * 60 * 1000) }
+      catch (e) {
+        process.stderr.write(`  ✗ ${e?.message ?? e}\n`)
+        return EXIT.USAGE
+      }
+    }
+    warnIgnoredGuiFlags(flags)
+    return runGui({ flags, plugins, timeoutMs: guiTimeoutMs })
   }
 
   // 插件加载了什么，必须打在屏幕上（`--machine` 模式下 stdout 只允许有 __READY__，
@@ -559,14 +634,19 @@ function chunkBytesOverride() {
   return n
 }
 
-/** 用系统默认方式打开一个 URL（不阻塞） */
+/**
+ * 用系统默认方式打开一个 URL（不阻塞）。
+ *
+ * 实现在 `src/gui.js` 的 `openUrl()`（界面与命令行共用一份）。
+ * ⚠️ 这里**绝不能**再把链接交给 `cmd /c start`：Node 不会给不含空格的参数加引号，
+ *    cmd.exe 会把 URL 里的 `&` 当命令分隔符 —— 对方给的链接
+ *    `https://relay/room/…?x=1&calc` 就等于任意命令执行（P0-1）。
+ */
 function openBrowser(url) {
-  const cmd = process.platform === 'win32' ? 'cmd'
-    : process.platform === 'darwin' ? 'open' : 'xdg-open'
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
-  try {
-    spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref()
-  } catch { /* 打不开就算了，用户自己复制链接 */ }
+  try { openUrl(url) } catch (e) {
+    // 链接不合法（不是 http/https）或系统没有打开方式：说出来，别假装打开了
+    process.stderr.write(`  ✗ 打不开这个链接：${e?.message ?? e}\n`)
+  }
 }
 
 /**
@@ -596,5 +676,7 @@ main()
   .catch((err) => {
     process.stderr.write(`\n  ✗ ${err?.message ?? err}\n\n`)
     if (process.env.FLICKER_DEBUG) process.stderr.write((err?.stack ?? '') + '\n')
-    process.exitCode = EXIT.ERROR
+    // 参数写错要按 USAGE(2) 退出（契约见 行为与运行.md §5.2）。
+    // 解析函数抛的 UsageError 带 code，这里统一映射 —— 非法时长从前落在 1 上。
+    process.exitCode = err?.code === 'USAGE' ? EXIT.USAGE : EXIT.ERROR
   })

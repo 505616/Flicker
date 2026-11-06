@@ -9,7 +9,8 @@
  *
  * 这个功能是项目唯一的传播机制：每送出去一次，接收方就多一个完整的站点。
  */
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { sanitizeRelPath } from './manifest.js'
@@ -79,14 +80,18 @@ export function detectSelf() {
  *    判据在 `gen/check-source-pack.mjs`：结构（该在的都在）+ 行为（解开后真的跑一次）。
  */
 const PACK_EXCLUDES = [
-  /^\.git\//,                    // 版本库
-  /^node_modules\//,
-  /^dist\//,                     // 构建产物（源码包里不该有 91 MB 的 exe）
-  /^_lab\/out\//,                // 体检/压测的日志与截图（临时产物）
+  // ⚠️ 一律用 (^|/) 匹配任意层级，不能只锚根目录（P2-8）：relay/node_modules/ 这种
+  //    **嵌套**的依赖树 / 构建产物 / 版本库元数据同样不该进赠品 —— 体积大，
+  //    还可能带上 .git/config 里的 remote URL。从前这几条只匹配根目录：
+  //    只要有人在子目录跑过一次 npm install，赠品就会静默多出几十 MB 第三方代码。
+  /(^|\/)\.git\//,              // 版本库（任意层级，不只是根）
+  /(^|\/)node_modules\//,
+  /(^|\/)dist\//,               // 构建产物（源码包里不该有 91 MB 的 exe）
+  /(^|\/)_lab\/out\//,          // 体检/压测的日志与截图（临时产物）
   /(^|\/)\.DS_Store$/,
   /(^|\/)Thumbs\.db$/,
-  /^flicker-plugin\.log$/,       // 示例插件往 cwd 写的日志（跑过一次就会出现）
-  /^relay\/api-token\.txt$/,     // ⚠️ 凭据！Cloudflare 部署令牌，绝不能进赠品
+  /(^|\/)flicker-plugin\.log$/, // 示例插件往 cwd 写的日志（跑过一次就会出现）
+  /(^|\/)relay\/api-token\.txt$/, // ⚠️ 凭据！Cloudflare 部署令牌，绝不能进赠品
   // ⚠️ **本地状态目录**：里面是"这台机器/这个人"的东西，不是源码。
   //    `relay/.wrangler/cache/wrangler-account.json` 里就有 Cloudflare 账号 id 与邮箱
   //    ——2026-10 用户要求检查个人信息时发现的：它**曾经真的进了赠品**，
@@ -438,24 +443,60 @@ export function unpackArchive(bytes) {
  */
 export async function unpackToDir(bytes, dir, { force = false } = {}) {
   const entries = unpackArchive(bytes)
-  await mkdir(dir, { recursive: true })
-  const written = []
-  let total = 0
-  for (const e of entries) {
-    const dest = path.join(dir, e.rel)
-    if (!force && existsSync(dest)) {
-      throw new UnpackError(
-        `目标已经存在：${e.rel} —— 不覆盖（确定要覆盖就加 --force；或者换一个 --dir）`,
-        'EXISTS')
+
+  // ① 先把「会不会撞车」全部检查完，再动手写。
+  //    从前是边写边查：撞到第 3 个文件才报 EXISTS 时，前两个已经写进目标目录了。
+  const dests = entries.map((e) => path.join(dir, e.rel))
+  if (!force) {
+    for (let i = 0; i < dests.length; i++) {
+      if (existsSync(dests[i])) {
+        throw new UnpackError(
+          `目标已经存在：${entries[i].rel} —— 不覆盖（确定要覆盖就加 --force；或者换一个 --dir）`,
+          'EXISTS')
+      }
     }
-    await mkdir(path.dirname(dest), { recursive: true })
-    await writeFile(dest, e.data)
-    // 可执行位只在 POSIX 上有意义；Windows 没有这个概念（zip 里也带不住）
-    if (process.platform !== 'win32' && (e.mode & 0o111)) {
-      try { await chmod(dest, e.mode | 0o600) } catch { /* 尽力而为 */ }
-    }
-    written.push({ rel: e.rel, bytes: e.data.length })
-    total += e.data.length
   }
-  return { files: written, bytes: total, dir }
+
+  // ② 先全部解到目标**旁边**的临时目录，最后再逐个搬进去（P3-9）。
+  //    这样「解到一半失败」（磁盘满、路径不可写、条目冲突）时，目标目录要么没动过，
+  //    要么能在 catch 里把这次搬进去的文件全部撤回 —— 不会留下半棵树，让用户误判
+  //    「究竟解开了没有」。（--force 覆盖掉的旧文件无法恢复，这是覆盖的代价。）
+  const absDir = path.resolve(dir)
+  const staging = path.join(path.dirname(absDir),
+    `.${path.basename(absDir)}.unpack-${randomBytes(6).toString('hex')}`)
+  const moved = []
+  try {
+    await mkdir(staging, { recursive: true })
+    const written = []
+    let total = 0
+    for (const e of entries) {
+      const src = path.join(staging, e.rel)
+      await mkdir(path.dirname(src), { recursive: true })
+      await writeFile(src, e.data)
+      written.push({ rel: e.rel, bytes: e.data.length })
+      total += e.data.length
+    }
+    await mkdir(absDir, { recursive: true })
+    for (let i = 0; i < entries.length; i++) {
+      const dest = dests[i]
+      await mkdir(path.dirname(dest), { recursive: true })
+      // Windows 的 rename 不能覆盖已存在的文件 —— 明确要求覆盖时先删掉它
+      if (force) await rm(dest, { force: true })
+      await rename(path.join(staging, entries[i].rel), dest)
+      moved.push(dest)
+      // 可执行位只在 POSIX 上有意义；Windows 没有这个概念（zip 里也带不住）
+      if (process.platform !== 'win32' && (entries[i].mode & 0o111)) {
+        try { await chmod(dest, entries[i].mode | 0o600) } catch { /* 尽力而为 */ }
+      }
+    }
+    return { files: written, bytes: total, dir }
+  } catch (err) {
+    // 回滚这次搬进目标目录的文件（只删我们自己搬的）
+    for (const dest of moved.reverse()) {
+      try { await rm(dest, { force: true }) } catch { /* 尽力而为 */ }
+    }
+    throw err
+  } finally {
+    try { await rm(staging, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+  }
 }

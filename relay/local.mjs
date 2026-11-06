@@ -21,7 +21,7 @@
 import { createServer } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { RoomStore } from '../src/relay/room.js'
-import { handleRelay } from '../src/relay/protocol.js'
+import { handleRelay, maxBatchBodyBytes } from '../src/relay/protocol.js'
 import { createPluginRegistry, pluginPaths } from '../src/plugin/registry.js'
 import { relayStoreFrom, describeStore } from '../src/plugin/relay-store.js'
 import { RECEIVER_HTML } from './page.generated.js'
@@ -30,6 +30,12 @@ import { SENDER_HTML } from './sender.generated.js'
 const args = process.argv.slice(2)
 const portArg = args.find((a) => a.startsWith('--port='))
 const port = portArg ? Number(portArg.split('=')[1]) : 8787
+// P3：`--port=abc` 从前会一路走到 server.listen(NaN) 抛 ERR_SOCKET_BAD_PORT，
+// 用户只看到一句 Node 内部错误。这里提前校验并给出可照做的提示。
+if (!Number.isInteger(port) || port < 0 || port > 65535) {
+  console.error(`\n  ✗ --port 需要一个 0–65535 的整数，收到 "${portArg?.split('=')[1] ?? port}"\n`)
+  process.exit(2)
+}
 const verbose = args.includes('--verbose')
 // `--plugin=a --plugin=b` 与 `--plugins`（只列不跑）
 const pluginFlags = args.filter((a) => a.startsWith('--plugin=')).map((a) => a.slice('--plugin='.length))
@@ -78,11 +84,105 @@ if (listOnly) {
 const store = relayStoreFrom(plugins, new RoomStore())
 if (verbose || store.__plugin) console.log(`  存储后端：${describeStore(store)}`)
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
+/**
+ * 单个请求体的上限。
+ *
+ * 与协议层的 /batch 上限**同一个公式**（64 条 × 单条上限 + 长度前缀）——
+ * 本地中继绝不能比 Worker 更宽松，否则"本地能跑、线上 413"又会成为一类假象。
+ * 关键不在具体数值，而在**有界**：从前这里完全没有上限，
+ * 局域网内任何人发一个 1 GB 的 POST 就能把进程内存翻倍。
+ */
+const MAX_BODY_BYTES = maxBatchBodyBytes(store.maxMessageBytes)
+
+/** 客户端中途断开时抛出的错误 —— 这是**正常现象**（取消上传、网络抖动），不该刷屏 */
+function isConnectionReset(e) {
+  const code = e?.code ?? e?.cause?.code
+  return code === 'ECONNRESET' || code === 'EPIPE' || code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+    code === 'ERR_STREAM_DESTROYED' || e?.name === 'AbortError' || e?.message === 'aborted'
+}
+
+function sendJson(res, status, obj) {
+  if (res.headersSent) { try { res.end() } catch { /* 已断 */ } return }
+  const buf = Buffer.from(JSON.stringify(obj))
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': String(buf.length),
+    // 超限时客户端可能还在发；让连接在响应后关闭，不再把剩余字节读进内存
+    Connection: 'close',
+  })
+  res.end(buf)
+}
+
+/**
+ * 读请求体：先看 Content-Length，再边读边累计，超限立刻 413 并停止读。
+ *
+ * 旧写法是 `for await (const c of req) chunks.push(c)` 无上限地缓存 ——
+ * 半截请求抛出的 ECONNRESET 没有 catch，async 回调 reject 且无人接，
+ * Node 默认按 unhandled rejection 处理 → **整个中继进程 exit 1**，
+ * 所有房间与进行中的传输一起消失。
+ */
+async function readRequestBody(req) {
+  const declared = req.headers['content-length']
+  if (declared !== undefined) {
+    if (!/^[0-9]+$/.test(String(declared).trim())) {
+      throw Object.assign(new Error('Content-Length 不合法'), { code: 'BAD_REQUEST', status: 400 })
+    }
+    const n = Number(declared)
+    if (Number.isSafeInteger(n) && n > MAX_BODY_BYTES) {
+      throw Object.assign(
+        new Error(`请求体过大（声明 ${n} > ${MAX_BODY_BYTES} 字节）`),
+        { code: 'TOO_LARGE', status: 413 })
+    }
+  }
+  // 已知 Content-Length 时**预分配一次**、直接拷进去：
+  // 旧写法"先把 chunks 都留着、最后 Buffer.concat"的峰值是 2× 请求体，
+  // 而一个满窗 /batch 就是十几 MiB。预分配把峰值压到 1×。
+  const declaredLen = Number(declared)
+  if (Number.isSafeInteger(declaredLen) && declaredLen >= 0 && declaredLen <= MAX_BODY_BYTES) {
+    const buf = Buffer.allocUnsafe(declaredLen)
+    let off = 0
+    for await (const c of req) {
+      if (off + c.length > declaredLen) {
+        throw Object.assign(new Error('请求体超出 Content-Length'), { code: 'BAD_REQUEST', status: 400 })
+      }
+      c.copy(buf, off)
+      off += c.length
+    }
+    if (off !== declaredLen) {
+      throw Object.assign(new Error('请求体被截断（少于 Content-Length）'), { code: 'BAD_REQUEST', status: 400 })
+    }
+    return buf
+  }
+
+  // 没有 Content-Length（chunked）或长度不合法：只能边读边累计，超限立刻中止
   const chunks = []
-  for await (const c of req) chunks.push(c)
-  const body = Buffer.concat(chunks)
+  let total = 0
+  for await (const c of req) {
+    total += c.length
+    if (total > MAX_BODY_BYTES) {
+      throw Object.assign(
+        new Error(`请求体过大（已读 ${total} > ${MAX_BODY_BYTES} 字节）`),
+        { code: 'TOO_LARGE', status: 413 })
+    }
+    chunks.push(c)
+  }
+  return Buffer.concat(chunks)
+}
+
+async function handleRequest(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
+
+  let body
+  try {
+    body = await readRequestBody(req)
+  } catch (e) {
+    // 客户端中途断开：正常现象，安静收场（进程必须活着）
+    if (isConnectionReset(e)) return
+    const status = Number.isInteger(e?.status) ? e.status : 400
+    if (verbose) console.log(`  ${req.method} ${url.pathname} → ${status} ${e.message}`)
+    sendJson(res, status, { error: e.code ?? 'BAD_REQUEST', message: e.message })
+    return
+  }
 
   if (verbose && url.pathname.startsWith('/r/')) {
     const room = url.pathname.split('/')[2] ?? ''
@@ -108,7 +208,25 @@ const server = createServer(async (req, res) => {
   r.headers.forEach((v, k) => { headers[k] = v })
   res.writeHead(r.status, headers)
   res.end(buf)
+}
+
+const server = createServer((req, res) => {
+  // ⚠️ 这个 .catch 是**进程存活**的关键，不是防御性编程：
+  //    async 回调返回的 Promise 没人接 → Node 默认 --unhandled-rejections=throw →
+  //    半截上传就能让整个本地中继 exit 1（症状：所有人房间突然消失）。
+  handleRequest(req, res).catch((e) => {
+    if (isConnectionReset(e)) return
+    console.error(`  ✗ 请求处理失败：${e?.stack ?? e}`)
+    sendJson(res, 500, { error: 'INTERNAL', message: String(e?.message ?? e) })
+  })
 })
+
+// 超时：没有它们，慢速攻击（只发头不发体、或极慢地上传）可以无限占着连接。
+// requestTimeout 是"整个请求（含请求体）必须在这个时间内收完"。
+// 取 10 分钟而不是 30 秒：大窗口（64 × 2 MiB）在慢上行上本来就可能传很久，
+// 超时的目的只是不让连接**永远**挂着。
+server.requestTimeout = 10 * 60 * 1000
+server.headersTimeout = 60 * 1000
 
 /**
  * 收尾：**插件资源必须释放**（与发送端同一条承诺）。

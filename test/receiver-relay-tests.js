@@ -68,6 +68,18 @@ export function sliceFn(html, name) {
   throw new Error(`${name} 的花括号没有配对`)
 }
 
+/**
+ * 切一个**可能带 async 的**页面函数。
+ * ⚠️ sliceFn 从 `function name(` 开始切，会把前面的 `async ` 丢掉，
+ *    抽出来的源码里带着 await —— 在 new Function 里直接 SyntaxError。
+ */
+export function slicePageFn(html, name) {
+  const at = html.indexOf('function ' + name + '(')
+  assert.notEqual(at, -1, `页面里找不到 function ${name}`)
+  const isAsync = html.slice(Math.max(0, at - 6), at) === 'async '
+  return (isAsync ? 'async ' : '') + sliceFn(html, name)
+}
+
 /** 去掉注释与字符串字面量，只留真正的代码 —— 用于"不该出现 X"这类断言 */
 export function codeOnly(src) {
   return src
@@ -196,5 +208,110 @@ export function registerRelayPageTests(html) {
     assert.doesNotMatch(codeOnly(withoutLocal), /api\/chunk/,
       '除了局域网通路内部，不该有别的代码直接请求 /api/chunk')
     assert.match(local, /api\/chunk/, '局域网通路内部当然要用它')
+  })
+
+  // ── 清单分帧（P1-2）────────────────────────────────────────
+  //
+  // 中继单条消息有上限（约 2 MiB）。约一万个单块小文件的清单约 2.59 MB > 上限，
+  // 从前"发一个文件夹"在中继模式下是**确定性失败**（413 TOO_LARGE，不可重试）。
+  // 发送端把清单拆成多条；接收端按 seq=0 的 8 字节头自描述地拼回来。
+  //
+  // 这里的判据用**测试里独立实现的发送端分帧器**（frameManifest）—— 两边都按
+  // 规格逐字节写，拼得回来才算真的对齐，而不是"页面里的实现自己和自己一致"。
+
+  const MAX_PARTS = Number((/const MAX_MANIFEST_PARTS = (\d+);/.exec(html) || [])[1])
+  assert.ok(Number.isInteger(MAX_PARTS), '页面里应当有 MAX_MANIFEST_PARTS 常量')
+
+  // eslint-disable-next-line no-new-func
+  const framer = new Function('t', 'MAX_MANIFEST_PARTS',
+    sliceFn(html, 'manifestPartHeader') + '\n' + slicePageFn(html, 'fetchFramedManifest')
+    + '\nreturn { manifestPartHeader, fetchFramedManifest }')((k) => k, MAX_PARTS)
+
+  /**
+   * 发送端那一侧的分帧（按规格独立实现）：
+   *   payload = BE32(i) ‖ BE32(partCount) ‖ M.slice(i*partSize, …)，存于 seq=i
+   */
+  function frameManifest(msg, maxMsg) {
+    const partSize = maxMsg - 8
+    const partCount = Math.max(1, Math.ceil(msg.length / partSize))
+    const out = []
+    for (let i = 0; i < partCount; i++) {
+      const frag = msg.slice(i * partSize, Math.min(msg.length, (i + 1) * partSize))
+      const f = new Uint8Array(8 + frag.length)
+      const dv = new DataView(f.buffer)
+      dv.setUint32(0, i)
+      dv.setUint32(4, partCount)
+      f.set(frag, 8)
+      out.push(f)
+    }
+    return out
+  }
+
+  test('清单分帧：头就是 BE32(index) ‖ BE32(partCount)，不足 8 字节返回 null', () => {
+    const M = new Uint8Array(100)
+    const frames = frameManifest(M, 30)
+    const h = framer.manifestPartHeader(frames[2])
+    assert.deepEqual(h, { index: 2, partCount: frames.length })
+    assert.equal(framer.manifestPartHeader(new Uint8Array(7)), null)
+    assert.equal(framer.manifestPartHeader(null), null)
+  })
+
+  test('⭐ 清单分帧：多条消息按序号拼回原来的完整字节', async () => {
+    const M = new Uint8Array(250)
+    for (let i = 0; i < M.length; i++) M[i] = (i * 37 + 11) & 0xff
+    const frames = frameManifest(M, 40)          // partSize = 32 → 多条
+    assert.ok(frames.length > 1, '这个长度应当被拆成多条，否则用例没测到分帧')
+    for (const f of frames) assert.ok(f.length <= 40, '单条不能超过 maxMessageBytes')
+    const got = await framer.fetchFramedManifest(async (seq) => frames[seq])
+    assert.equal(got.partCount, frames.length)
+    assert.equal(Buffer.from(got.msg).toString('hex'), Buffer.from(M).toString('hex'),
+      '拼回来的 M 必须与发送端那条完整清单消息逐字节相同')
+  })
+
+  test('清单分帧：只有一条时也要能取（partCount=1 的常规场景）', async () => {
+    const M = new Uint8Array(30).fill(9)
+    const frames = frameManifest(M, 2 * 1024 * 1024)
+    assert.equal(frames.length, 1)
+    const got = await framer.fetchFramedManifest(async (seq) => frames[seq])
+    assert.equal(got.partCount, 1)
+    assert.equal(Buffer.from(got.msg).toString('hex'), Buffer.from(M).toString('hex'))
+  })
+
+  test('清单分帧：序号错位必须报错，绝不能把错位的段拼成一段坏清单', async () => {
+    const M = new Uint8Array(100).fill(7)
+    const frames = frameManifest(M, 30)
+    const swapped = frames.slice()
+    swapped[2] = frames[3]                       // 第 3 条的头写着 index=3
+    await assert.rejects(() => framer.fetchFramedManifest(async (seq) => swapped[seq]),
+      (e) => e.code === 'RELAY_BAD_MANIFEST',
+      '序号对不上还继续拼，界面只会看到一句没法定位的"清单解密失败"')
+  })
+
+  test('⭐ 清单分帧：partCount 上限 1024，超了给可读错误而不是去取一万条', async () => {
+    assert.equal(MAX_PARTS, 1024)
+    const bad = new Uint8Array(8)
+    const dv = new DataView(bad.buffer)
+    dv.setUint32(0, 0)
+    dv.setUint32(4, MAX_PARTS + 1)
+    await assert.rejects(() => framer.fetchFramedManifest(async () => bad),
+      (e) => e.code === 'RELAY_BAD_MANIFEST' && e.message === 'recv.msg.badManifestParts',
+      '超过上限要报专门的文案（不是让接收端按坏头去拉一百亿条消息）')
+  })
+
+  test('⭐ 中继序号：数据块与 ack 都加上清单分帧条数', () => {
+    const relay = sliceFn(html, 'relayTransport')
+    assert.match(relay, /fetchFramedManifest\(fetchSeq\)/, 'prepare 要先拼回分帧清单')
+    assert.match(relay, /manifestParts = framed\.partCount/, '记住分帧条数')
+    assert.match(relay, /fetchSeq\(manifestParts \+ seq\)/,
+      '取块的消息序号 = partCount + g')
+    assert.match(relay, /const seq = manifestParts \+ 1 \+ chunkSeq/,
+      'ack 的 upTo = partCount + 1 + g')
+  })
+
+  test('中继模式：密码错时先报可读的 BAD_PASSWORD（房间名校验）', () => {
+    const relay = sliceFn(html, 'relayTransport')
+    assert.match(relay, /toHex\(keys\.room\) !== room/,
+      '没有握手的中继模式只能靠派生的房间名判断密码')
+    assert.match(relay, /code: 'BAD_PASSWORD'/, '要落到"密码不一致"的文案上')
   })
 }

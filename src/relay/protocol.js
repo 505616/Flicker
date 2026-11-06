@@ -29,7 +29,7 @@
  * 注意：这个标记**不是**安全边界 —— 内容仍然全靠 AES-GCM 认证。
  */
 
-import { RoomStore, RelayError } from './room.js'
+import { RoomStore, RelayError, DEFAULT_MAX_MESSAGE_BYTES } from './room.js'
 import { EVENTS, SLOTS } from '../plugin/events.js'
 
 /** 消息类型标记（放在消息的第一个字节） */
@@ -79,11 +79,66 @@ function splitBatch(buf) {
     if (len === 0 || off + len > buf.length) {
       throw new RelayError('批量数据被截断（内容不足）', 'BAD_BATCH', 400)
     }
-    items.push(buf.subarray(off, off + len))
+    // ⚠️ 这里必须**复制**，不能只留 subarray。
+    //    子视图会一直引用整个请求体 ArrayBuffer：拆出 64 条、每条都小，
+    //    只要房间还存着其中一条，那一个巨大的请求体就永远释放不掉
+    //    （Worker 里就是"单请求瞬时占满 isolate 内存"的另一个来源）。
+    //    new Uint8Array(subarray) 是一次真正的拷贝，断开这层引用。
+    items.push(new Uint8Array(buf.subarray(off, off + len)))
     off += len
   }
   if (items.length === 0) throw new RelayError('批量数据为空', 'BAD_BATCH', 400)
   return items
+}
+
+/** 一批最多几条（与 room.js 的 putBatch 上限一致） */
+export const MAX_BATCH_MESSAGES = 64
+
+export function maxBatchBodyBytes(maxMessageBytes) {
+  return MAX_BATCH_MESSAGES * maxMessageBytes + 4 * MAX_BATCH_MESSAGES
+}
+
+export const MAX_MANIFEST_PARTS = 1024
+
+export function packManifestParts(manifestMessage, maxMessageBytes) {
+  if (!(manifestMessage instanceof Uint8Array) || manifestMessage.length === 0) {
+    throw new RelayError('清单消息为空', 'BAD_MESSAGE', 400)
+  }
+  const max = Number.isInteger(maxMessageBytes) && maxMessageBytes > 9 ? maxMessageBytes : 9
+  const partSize = max - 8
+  const partCount = Math.max(1, Math.ceil(manifestMessage.length / partSize))
+  if (partCount > MAX_MANIFEST_PARTS) {
+    throw new RelayError(
+      `清单太大：${manifestMessage.length} 字节需要拆成 ${partCount} 条`,
+      'MANIFEST_TOO_LARGE', 413)
+  }
+  const parts = []
+  for (let i = 0; i < partCount; i++) {
+    const start = i * partSize
+    const end = Math.min(manifestMessage.length, start + partSize)
+    const msg = new Uint8Array(8 + (end - start))
+    const dv = new DataView(msg.buffer)
+    dv.setUint32(0, i)
+    dv.setUint32(4, partCount)
+    msg.set(manifestMessage.subarray(start, end), 8)
+    parts.push(msg)
+  }
+  return parts
+}
+
+async function readRequestBytes(request, limit, what) {
+  const declared = request.headers.get('content-length')
+  if (declared !== null && /^[0-9]+$/.test(declared.trim())) {
+    const n = Number(declared)
+    if (Number.isSafeInteger(n) && n > limit) {
+      throw new RelayError(`${what}过大（声明 ${n} > ${limit} 字节）`, 'TOO_LARGE', 413)
+    }
+  }
+  const buf = new Uint8Array(await request.arrayBuffer())
+  if (buf.length > limit) {
+    throw new RelayError(`${what}过大（${buf.length} > ${limit} 字节）`, 'TOO_LARGE', 413)
+  }
+  return buf
 }
 
 const CORS = {
@@ -91,6 +146,29 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Max-Age': '86400',
+}
+
+/**
+ * 中继托管页面的安全响应头。
+ *
+ * 照搬局域网模式（src/server.js 的 sec）：页面完全自包含、不做任何外部请求。
+ * 一旦页面里有 XSS（接收页曾把文件名写进 innerHTML），没有 CSP 就能把解密后的
+ * 内容外发到任意外部地址；有 CSP 至少把出口堵死。
+ *
+ * ⚠️ script-src 'unsafe-inline' 是**必需**的：内核必须内联（零外部请求）。
+ *    它确实是 XSS 的放大器，所以真正的修法仍是消除 innerHTML —— CSP 是第二道闸。
+ * ⚠️ worker-src blob: 也是必需的：接收页把整文件摘要放进 Blob Worker。
+ * ⚠️ frame-ancestors 'none'：中继页面不该被任何站点套进 iframe（点击劫持）。
+ */
+const PAGE_SECURITY_HEADERS = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  'Pragma': 'no-cache',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy':
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+    "img-src data:; connect-src 'self'; worker-src blob:; " +
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
 }
 
 function json(obj, status = 200) {
@@ -211,7 +289,7 @@ export async function handleRelay(request, pathname, store, opts = {}) {
     const html = await opts.senderHtml()
     return new Response(html, {
       status: 200,
-      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS },
+      headers: { 'Content-Type': 'text/html; charset=utf-8', ...PAGE_SECURITY_HEADERS, ...CORS },
     })
   }
 
@@ -225,7 +303,7 @@ export async function handleRelay(request, pathname, store, opts = {}) {
     const html = await opts.pageHtml()
     return new Response(html, {
       status: 200,
-      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS },
+      headers: { 'Content-Type': 'text/html; charset=utf-8', ...PAGE_SECURITY_HEADERS, ...CORS },
     })
   }
 
@@ -238,8 +316,38 @@ export async function handleRelay(request, pathname, store, opts = {}) {
   if (!RoomStore.validRoomId(roomId)) {
     return errResponse(new RelayError('房间号格式不正确', 'BAD_ROOM_ID', 400))
   }
+  // ⚠️ 非法 seq 不能"当成没写" —— 那会把一个错误请求变成一次**创建房间**，
+  //    请求返回 200 而消息被静默丢弃（同一文件里 ack 的参数校验就很严格，这里也要）。
+  //    只有"完全没写 seq"才表示创建；写了就必须是非负整数。
+  /**
+ * 单条消息上限。
+ *
+ * 内置 RoomStore 一定有这个字段；插件存储可能没有（`STORE_METHODS` 没把它列为必需）。
+ * 没有时回落到协议保证的最小值 —— 绝不能变成 `undefined`：那会让
+ * `n > undefined` 恒为 false，读取上限直接失效（未认证的大 POST 就能打满内存）。
+ */
+  function limitBytes() {
+    return Number.isSafeInteger(store.maxMessageBytes) && store.maxMessageBytes > 0
+      ? store.maxMessageBytes
+      : DEFAULT_MAX_MESSAGE_BYTES
+  }
+
   const seqParam = url.searchParams.get('seq')
-  const seq = seqParam === null ? null : Number(seqParam)
+  let seq = null
+  if (seqParam !== null) {
+    if (!/^[0-9]+$/.test(seqParam.trim())) {
+      return errResponse(new RelayError(
+        'seq 必须是非负整数，收到 "' + seqParam + '"', 'BAD_SEQ', 400))
+    }
+    seq = Number(seqParam)
+  }
+
+  // 每次进房间接口都顺手清一遍过期房间（P3-4）：
+  // 过期清理原本只挂在 create() 上，而一个只 GET 的客户端可以让房间一直占着内存。
+  // 成本是 64 次比较，可接受。
+  // `sweep()` 是**可选**方法：内置 RoomStore 有，插件存储可以没有（清理由插件自己负责）。
+  // 直接调用会让没实现的插件存储在第一个请求上就 500 —— 这是 P3-6 说的"契约没写清"。
+  if (typeof store.sweep === 'function') store.sweep()
 
   try {
     switch (`${method} ${action}`) {
@@ -293,7 +401,8 @@ export async function handleRelay(request, pathname, store, opts = {}) {
       // ⚠️ 批量投递必须排在基础 POST 之前（switch 按字符串匹配）。
       //    序号由**服务端**分配 —— 这是并发投递不撞车的唯一干净解法。
       case 'POST /batch': {
-        const body = new Uint8Array(await request.arrayBuffer())
+        // 先按 Content-Length 预检、再读；上限 = 64 条 × 单条上限 + 长度前缀
+        const body = await readRequestBytes(request, maxBatchBodyBytes(limitBytes()), '批量请求')
         const items = splitBatch(body)
         const r = store.putBatch(roomId, items)
         return json({ ...r, ...store.status(roomId) }, 200)
@@ -306,18 +415,15 @@ export async function handleRelay(request, pathname, store, opts = {}) {
         if (created && created.created && plugins && plugins.count) {
           await plugins.emitAsync(EVENTS.RELAY_ROOM_CREATED, Object.freeze({ room: roomId }))
         }
-        if (seq === null || Number.isNaN(seq)) {
+        if (seq === null) {
           // 创建响应里也带上能力：发送端一定会走这一步，不必额外发一次请求
           return json({ ...created, ...store.status(roomId), maxMessageBytes: store.maxMessageBytes }, 200)
         }
-        const body = new Uint8Array(await request.arrayBuffer())
         // 单条上限与 store 用**同一个**读数（默认都是协议上界 1 MiB + 17）。
         // 两处各写死一份常量必然漂，所以这里读 store 的实例字段 ——
         // 它允许部署方或测量脚本放宽（见 room.js 的 maxMessageBytes 说明）。
-        if (body.length > store.maxMessageBytes) {
-          return errResponse(new RelayError(
-            `消息过大（${body.length} > ${store.maxMessageBytes} 字节）`, 'TOO_LARGE', 413))
-        }
+        // readRequestBytes 会先看 Content-Length：超限的请求**根本不读进内存**。
+        const body = await readRequestBytes(request, limitBytes(), '消息')
         const r = store.put(roomId, seq, body)
         return json({ ...r, ...store.status(roomId) }, 200)
       }

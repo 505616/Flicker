@@ -197,6 +197,100 @@ test('房间不存在时不重试 —— 立刻报错，不让用户白等', asy
   } finally { await relay.close() }
 })
 
+
+
+// ── P1-1：没有新数据可投时必须按 pollMs 等待（不能死循环 status）──────
+
+test('⭐ 数据已全部投出、只等最后几个 ack 时：status 调用必须被 pollMs 节流', async () => {
+  const { RelaySender } = await import('../src/relay/sender.js')
+  const sender = new RelaySender({
+    baseUrl: 'http://127.0.0.1:1', // 不会真的请求（client 被替换）
+    roomName: 'a'.repeat(64),
+    encKey: Buffer.alloc(32),
+    salt: Buffer.alloc(16),
+    manifest: { files: [], totalChunks: 0, totalBytes: 0 },
+    encManifest: { iv: Buffer.alloc(12), tag: Buffer.alloc(16), ct: Buffer.alloc(0) },
+    pollMs: 100,
+    windowSize: 8,
+  })
+
+  let statusCalls = 0
+  // 模拟"清单+数据全投完了，接收端还剩几条没确认"：
+  // posted=1=total，ackedBase=0 → planWindow 不会再投，但也没完成。
+  sender.client = {
+    posted: 1,
+    ackedBase: 0,
+    bytesPosted: 0,
+    manifestParts: 1,
+    totalMessages: 1,
+    // ⚠️ 只提供带重试的入口：若发送端退回直接调 status()，这里会 TypeError 当场失败
+    statusWithRetry: async () => {
+      statusCalls++
+      return { ackedBase: 0, nextSeq: 1, pending: 1 }
+    },
+    putBatch: async () => { throw new Error('这一轮不该再投递') },
+    destroy: async () => true,
+  }
+
+  const t0 = Date.now()
+  const result = await sender.run({ timeoutMs: 350 })
+  const elapsed = Date.now() - t0
+
+  assert.equal(result.reason, 'timeout', '一直等不到确认 → 如实超时')
+  assert.ok(elapsed >= 250, `应等到空闲超时（实际 ${elapsed}ms）`)
+  assert.ok(statusCalls <= 6,
+    `没有新数据可投时必须按 pollMs 等待；实际 ${statusCalls} 次 status（旧实现 100ms 内 90 万次）`)
+  assert.ok(statusCalls >= 2, '也不能一次都不问（那样永远不知道对方确认了没有）')
+})
+
+// ── P1-4：状态轮询要走重试（一次 5xx 不该废掉整次传输）───────────
+
+test('状态轮询遇到一次瞬时 503 → 自动重试后成功（/batch 早就这么做了）', async () => {
+  let hits = 0
+  const server = createServer((req, res) => {
+    hits++
+    if (hits === 1) {
+      res.writeHead(503, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'UNAVAILABLE', message: '临时不可用' }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ackedBase: 0, nextSeq: 0, pending: 0 }))
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  try {
+    const client = new RelayClient({
+      baseUrl: `http://127.0.0.1:${server.address().port}`,
+      roomName: 'a'.repeat(64),
+      encKey: Buffer.alloc(32),
+      manifest: { files: [], totalChunks: 0 },
+      retries: 2,
+      sleep: () => Promise.resolve(),
+    })
+    const st = await client.statusWithRetry()
+    assert.equal(st.nextSeq, 0, '重试后应拿到真实状态')
+    assert.equal(hits, 2, '一次 503 之后应当再试一次')
+    assert.equal(client.retryCount, 1, '要记录到一次重试（供 UI 显示"链路不稳"）')
+  } finally {
+    server.closeAllConnections()
+    await new Promise((r) => server.close(r))
+  }
+})
+
+// ── P2-2：请求超时随体积放大（慢上行不会被固定 30s 掐断）────────
+
+test('P2-2：/batch 的超时按体积放大，且有上限', () => {
+  const client = new RelayClient({
+    baseUrl: 'http://x', roomName: 'a'.repeat(64),
+    encKey: Buffer.alloc(32), manifest: { files: [], totalChunks: 0 },
+  })
+  assert.equal(client._timeoutFor(0), 30_000, '无请求体（GET/创建）就是基础超时')
+  // 16 MiB 满窗：30s + 16 MiB / 64 KB/s = 30s + 256s
+  assert.equal(client._timeoutFor(16 << 20), 30_000 + 256_000)
+  assert.equal(client._timeoutFor(2 ** 30), client.maxTimeout, '必须有封顶，不能无限等')
+  assert.ok(client.maxTimeout <= 15 * 60 * 1000)
+})
+
 test('彻底失败时退回记账：进度条不会显示一个永远到不了的数字', async () => {
   const relay = await startFlakyRelay({ failAt: 1 })
   // 把中继整个关掉，制造一个"怎么重试都不行"的局面

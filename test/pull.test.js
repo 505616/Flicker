@@ -237,8 +237,11 @@ test('密码不对 → 明确报"密码不一致"，不写任何文件（退出�
  * @param {(ctx:object)=>void} [o.mutateManifest] 造完清单后改一改（例如塞一个坏路径）
  * @param {(info:{fi:number,ci:number,ct:Buffer})=>Buffer} [o.tamperChunk] 篡改某个块
  * @param {(file:object)=>string} [o.wrongSha] 把某个文件的整体摘要改错
+ * @param {Map<number,number>|null} [o.flakyChunks] seq → 还要掐断几次（模拟瞬时断连）
  */
-async function badSender({ password, files, mutateManifest, tamperChunk, wrongSha } = {}) {
+async function badSender({
+  password, files, mutateManifest, tamperChunk, wrongSha, flakyChunks = null,
+} = {}) {
   const token = randomBytes(18).toString('base64url')
   const salt = randomBytes(16)
   const keys = deriveKeys(deriveVerifier(password, salt))
@@ -246,6 +249,8 @@ async function badSender({ password, files, mutateManifest, tamperChunk, wrongSh
   const sid = 'sid-test'
   let tokenConsumed = false
   let done = false
+  let pageHits = 0          // 一次性令牌被消费了几次（重试测试要断言只能是 1）
+  let chunkHits = 0         // /api/chunk 被请求了几次（含被掐断的那些）
 
   // 清单 + 逐块哈希（分块大小用协议默认值）
   const { PARAMS } = await import('../src/suite/flicker1.js')
@@ -281,7 +286,12 @@ async function badSender({ password, files, mutateManifest, tamperChunk, wrongSh
       res.end(b)
     }
     if (url.pathname === '/api/health') { res.writeHead(200).end('ok'); return }
-    if (url.pathname === '/') { tokenConsumed = true; res.writeHead(200, { 'Content-Type': 'text/html' }).end('<html></html>'); return }
+    if (url.pathname === '/') {
+      pageHits++
+      tokenConsumed = true
+      res.writeHead(200, { 'Content-Type': 'text/html' }).end('<html></html>')
+      return
+    }
     if (url.pathname === '/api/session') {
       if (!tokenConsumed) { json(401, { error: 'TOKEN_INVALID', message: '先打开页面' }); return }
       json(200, {
@@ -308,6 +318,7 @@ async function badSender({ password, files, mutateManifest, tamperChunk, wrongSh
     }
     if (url.pathname === '/api/manifest') { json(200, wire_manifest()); return }
     if (url.pathname === '/api/chunk') {
+      chunkHits++
       const seq = Number(url.searchParams.get('seq'))
       let fi = -1, ci = -1
       for (let i = 0; i < wire.length; i++) {
@@ -319,6 +330,13 @@ async function badSender({ password, files, mutateManifest, tamperChunk, wrongSh
       const f = wire[fi]
       const plain = files[fi].data.subarray(ci * chunkBytes,
         Math.min((ci + 1) * chunkBytes, files[fi].data.length))
+      // 可注入"瞬时网络故障"：把某块第一次请求的连接直接掐掉（模拟 ECONNRESET）。
+      // 用来验证接收端会**有限重试**，而不是一次抖动就把整个文件判死（P1-15）。
+      if (flakyChunks && (flakyChunks.get(seq) ?? 0) > 0) {
+        flakyChunks.set(seq, flakyChunks.get(seq) - 1)
+        req.socket.destroy()
+        return
+      }
       const { ct, tag } = sealChunk(keys.enc, fi, ci, f.chunks, plain)
       let body = ct
       if (tamperChunk) body = tamperChunk({ fi, ci, ct })
@@ -339,7 +357,13 @@ async function badSender({ password, files, mutateManifest, tamperChunk, wrongSh
   const base = `https://127.0.0.1:${server.address().port}`
   cleanups.push(() => new Promise((r) => server.close(r)))
   cleanups.push(() => cert.cleanup())
-  return { base, token, link: `${base}/?k=${token}`, get done() { return done }, cert, wire }
+  return {
+    base, token, link: `${base}/?k=${token}`,
+    get done() { return done },
+    get pageHits() { return pageHits },
+    get chunkHits() { return chunkHits },
+    cert, wire,
+  }
 }
 
 const password = 'bad-sender-pass'
@@ -408,6 +432,9 @@ test('⭐ 反向：整文件摘要对不上 → 不定稿，半成品留下（IN
     const left = await readdir(out)
     assert.ok(!left.includes('bad.bin'), '定稿文件不能产生')
     assert.ok(left.includes('bad.bin.flicker-part'), '半成品要留下（一眼能认出来）')
+    await sleep(300)
+    assert.equal(s.done, false,
+      '有文件失败时**绝不能** POST /api/done —— 那会让发送端销毁会话，用户失去重试机会（P1-15）')
   })
 
 test('同名文件 → 自动改名，绝不覆盖（与接收模式一致）', { timeout: 120000 }, async () => {
@@ -434,6 +461,67 @@ test('收完之后通知对方 /api/done（协议里的完成判据）', { timeo
   await sleep(100)
   assert.equal(s.done, true, '必须发 /api/done —— 否则发送端会一直等下去')
 })
+
+// ── ④ 瞬时错误重试 / 失败语义（P1-15、P3-3）────────────────
+
+test('⭐ P1-15：一次瞬时断连 → 自动重试后成功；一次性令牌只消费一次',
+  { timeout: 120000 }, async () => {
+    const out = await tempDir()
+    const data = randomBytes(3000)              // 默认 1 MiB 块大小 → 只有 1 块
+    const s = await badSender({
+      password,
+      files: [{ rel: 'retry.bin', data }],
+      flakyChunks: new Map([[0, 1]]),           // 第一次请求 seq=0 直接掐断连接（ECONNRESET）
+    })
+
+    const r = await pullFromLink({ link: s.link, password, dir: out })
+    assert.equal(r.ok, true, `一次瞬时抖动不该让文件永久失败：${JSON.stringify(r.failed)}`)
+    assert.equal(Buffer.compare(await readFile(path.join(out, 'retry.bin')), data), 0,
+      '重试之后内容必须逐字节一致')
+    assert.equal(s.pageHits, 1, '一次性令牌只能消费一次 —— 重试绝不能重访 /?k=')
+    assert.ok(r.retries >= 1, `应当报告发生过自动重试，实际 retries=${r.retries}`)
+    assert.ok(s.chunkHits >= 2, '应当是"第一次被掐断 + 第二次成功"，而不是第一次就成功')
+
+    await sleep(100)
+    assert.equal(s.done, true, '全部文件成功之后才允许 POST /api/done')
+  })
+
+test('⭐ P1-15：非瞬时错误（如 4xx 数据校验失败）不重试，避免白等',
+  { timeout: 120000 }, async () => {
+    const out = await tempDir()
+    // 篡改一个块 → 解密失败（DECRYPT），这属于"重试一万次也不会变好"
+    const s = await badSender({
+      password,
+      files: [{ rel: 'bad.bin', data: randomBytes(4096) }],
+      tamperChunk: ({ ct }) => { const b = Buffer.from(ct); b[b.length - 1] ^= 0xff; return b },
+    })
+    // 单个文件的失败是"记进 failed"而不是整场抛错（这样其余文件还能继续收）
+    const r = await pullFromLink({ link: s.link, password, dir: out })
+    assert.equal(r.ok, false)
+    assert.match(String(r.failed[0]?.reason), /解密失败/)
+    // 只有真正的瞬时故障才该被重试：这条路径一次请求就够，不该反复打对方
+    assert.equal(s.chunkHits, 1, `校验失败不该重试（实际请求了 ${s.chunkHits} 次）`)
+  })
+
+test('⭐ P3-3：清单缺 sha256 → 整场拒绝，绝不"跳过整文件校验直接定稿"',
+  { timeout: 120000 }, async () => {
+    const out = await tempDir()
+    const s = await badSender({
+      password,
+      files: [{ rel: 'no-sha.txt', data: Buffer.from('x') }],
+      mutateManifest: (wire) => { delete wire[0].sha256 },
+    })
+    await assert.rejects(
+      () => pullFromLink({ link: s.link, password, dir: out }),
+      (e) => {
+        assert.equal(e.code, 'E_MANIFEST_UNVERIFIABLE')
+        assert.match(e.message, /sha256/)
+        return true
+      })
+    assert.deepEqual(await readdir(out), [], '清单不可验证时一个字节都不该写')
+    await sleep(100)
+    assert.equal(s.done, false, '清单校验失败时绝不能通知对方"完成"')
+  })
 
 // ── ③ 链接解析与指纹比较（纯函数）──────────────────────────
 

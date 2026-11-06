@@ -72,6 +72,22 @@ export class RelaySender {
   /** 建立房间并放入清单；返回给对方打开的链接 */
   async start() {
     await this.client.open(this.manifestMessage)
+
+    // P3-8：/health 与创建响应来自**同一份配置**时两者一致；但多 isolate、
+    // 插件 store、代理改写等情况下可能不一致。若创建响应声明的上限比
+    // 我们据 /health 选出的块还小，投递时必然 413（不可重试）——
+    // 那不如在开局就明确报清楚，而不是让用户传到一半看到"消息过大"。
+    const cap = this.client.maxMessageBytes
+    const chunkBytes = this.manifest?.files?.[0]?.chunkBytes
+    if (Number.isInteger(cap) && Number.isInteger(chunkBytes) && chunkBytes + 17 > cap) {
+      const e = new Error(
+        '中继的能力声明前后不一致：/health 允许的消息上限与创建响应的不同，' +
+        `按 /health 选出的块（${chunkBytes} 字节 + 17 字节消息开销）会被创建响应声明的 ${cap} 字节上限拒绝。` +
+        '请重试一次；若持续出现，说明这个中继的配置不稳定，可临时用 --chunk 指定更小的块。')
+      e.code = 'CAPS_MISMATCH'
+      throw e
+    }
+
     this.phase = PHASE.WAITING
     this.onEvent({ type: 'relay-ready', posted: this.client.posted })
     return this.link()
@@ -110,7 +126,9 @@ export class RelaySender {
     //    所以只要有 ack 在推进，就重置计时。
     this._idleSince = Date.now()
     this._idleRounds = 0
-    const total = 1 + this.manifest.totalChunks
+    // ⚠️ 总消息数 = 清单分片数 + 数据块数（清单可能被拆成多条，P1-2）。
+    //    写死 1 + totalChunks 的话，清单一大就永远等不到"完成"。
+    const total = this.client.totalMessages
     let st = { ackedBase: 0, nextSeq: 0, pending: 0 }
 
     while (!this._stopped && !shouldStop?.()) {
@@ -253,7 +271,10 @@ export class RelaySender {
       // 需要新 ack 才能继续时，才真的问一次状态（这是唯一会等一个往返的地方）
       if (!sentSomething || Math.max(0, this.windowSize - (this.client.posted - st.ackedBase)) === 0) {
         try {
-          st = await this.client.status()
+          // ⚠️ 状态轮询必须与 /batch 走同一套重试（P1-4）：
+          //    长传输要轮询几百次，一次代理 5xx / 链路抖动就 throw 会销毁房间、
+          //    整次传输作废（已传的进度全废）。只有"房间真没了"才立刻结束。
+          st = await this.client.statusWithRetry()
         } catch (e) {
           // 房间被销毁或过期 —— 传输结束（可能正常，也可能是对方关掉了页面）
           if (e.code === 'NO_ROOM' || e.status === 404 || e.status === 410) {
@@ -266,9 +287,13 @@ export class RelaySender {
         if (this.client.posted >= total && st.ackedBase >= total) break
       }
 
-      // 窗口满说明接收端还没跟上 —— 等一下再问；
-      // 窗口没满（投完了在等最后几个 ack）则立刻再循环问一次。
-      if (Math.max(0, this.windowSize - (this.client.posted - st.ackedBase)) === 0) {
+      // ⚠️ P1-1：**没有新数据可投**时也必须等 pollMs，不能立刻再问。
+      //    旧条件只判"窗口满"，于是"数据全投完、在等最后几个 ack"（posted>=total
+      //    且窗口没满）时会以网络往返速度死循环 GET /r/:room 状态——
+      //    实测 100 ms 内 9×10^5 次；真实链路上就是每秒 5~1000 次、
+      //    等对方打开链接的 15 分钟里能烧掉几万到上百万次请求（免费额度直接打光）。
+      if (!sentSomething ||
+          Math.max(0, this.windowSize - (this.client.posted - st.ackedBase)) === 0) {
         await new Promise((r) => setTimeout(r, this.pollMs))
       }
     }
@@ -341,8 +366,10 @@ export class RelaySender {
   _bytesFor(startSeq, count) {
     const files = this.manifest.files
     let bytes = 0
+    const manifestParts = this.client.manifestParts
     for (let i = 0; i < count; i++) {
-      const ordinal = startSeq + i - 1        // seq 0 是清单
+      // seq 0..manifestParts-1 是清单分片，数据块从 manifestParts 开始
+      const ordinal = startSeq + i - manifestParts
       if (ordinal < 0) continue
       for (const f of files) {
         if (ordinal >= f.firstChunk && ordinal < f.firstChunk + f.chunks) {

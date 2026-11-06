@@ -11,7 +11,7 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { rm } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import {
@@ -19,7 +19,9 @@ import {
   rootStoreCount, findResidualCa, cleanResidual, localIPv4, primaryIPv4,
   support, CertError, CA_SUBJECT_MARK, keyUsageOf, manualTrustHint,
   removeFromMy, findMyLeftovers, myLeftoverCount, cleanAllLeftovers, cleanTempDirs,
+  CA_OWNER_FILE,
 } from '../src/trust.js'
+import { Destroyer } from '../src/destroy.js'
 
 const pexec = promisify(execFile)
 const isWindows = process.platform === 'win32'
@@ -255,6 +257,57 @@ test('findResidualCa 只认自己的证书，不动别人的', { skip: skipStore
   assert.equal(await rootStoreCount(), before, '查询不应改动证书库')
 })
 
+test('⭐ P2-3：另一个实例还在跑时，它刚装的 CA 绝不能被清掉', { skip: skipStore }, async () => {
+  // ⚠️ 场景是真的：同一用户开两个 flicker（GUI + CLI）。第二个实例启动时做残留清理，
+  //    旧实现见到 "Flicker Session CA" 就删 —— 第一个实例正在用的 CA 被清掉，
+  //    它之后的每次 TLS 重连（刷新/断点续传）都会因"签发者不受信任"失败，且极难查。
+  const before = await rootStoreCount()
+  try {
+    await trustCa(session.caDer, session.dir)
+    assert.equal(await rootStoreCount(), before + 1, '前提：CA 已装进 Root')
+
+    // 把"安装者"改成另一个进程（用注入的 isAlive 模拟它活着）
+    const ownerPath = path.join(session.dir, CA_OWNER_FILE)
+    const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
+    await writeFile(ownerPath, JSON.stringify({ ...owner, pid: 424242 }))
+
+    const kept = await cleanResidual({ isAlive: (pid) => pid === 424242 })
+    assert.equal(kept.removed.length, 0, '另一个实例还在跑时不能删它的 CA')
+    assert.deepEqual(kept.kept, [session.caThumbprint], '应当明确记成"保留"而不是静默跳过')
+    assert.equal(await rootStoreCount(), before + 1, '证书必须还在信任库里')
+
+    // 安装者已不在 —— 这才是真正的崩溃遗留，可以清
+    const gone = await cleanResidual({ isAlive: () => false })
+    assert.equal(gone.removed.length, 1,
+      `安装者已不在时应当清掉残留（实际: ${JSON.stringify(gone)}）`)
+    assert.equal(await rootStoreCount(), before, '清理后应当完全还原')
+  } finally {
+    // 兜底：无论断言在哪一步失败，都别把证书留在用户的 Root 库里
+    await cleanResidual({ olderThanMs: 0 }).catch(() => {})
+  }
+})
+
+test('⭐ P2-3：没有安装者记录时按时间兜底 —— 刚装的不删，明确够旧才清', { skip: skipStore }, async () => {
+  const before = await rootStoreCount()
+  try {
+    await trustCa(session.caDer, session.dir)
+    // 模拟旧版本留下的证书：没有安装者记录
+    await rm(path.join(session.dir, CA_OWNER_FILE), { force: true })
+    assert.equal(await rootStoreCount(), before + 1)
+
+    const fresh = await cleanResidual()          // 默认阈值：刚装的不能动
+    assert.equal(fresh.removed.length, 0, '没有记录时不能凭"看起来像残留"就删')
+    assert.equal(await rootStoreCount(), before + 1, '太新的证书必须保留（可能属于别的实例）')
+
+    // 明确够旧（或调用方显式要求）才清
+    const old = await cleanResidual({ olderThanMs: 0, now: () => Date.now() + 60_000 })
+    assert.equal(old.removed.length, 1, '明确够旧时才是可清的残留')
+    assert.equal(await rootStoreCount(), before)
+  } finally {
+    await cleanResidual({ olderThanMs: 0 }).catch(() => {})
+  }
+})
+
 test('⭐ 上层工具污染 PSModulePath 时，证书库查询仍然可用', { skip: skipStore }, async (t) => {
   // 这个用例复刻的是一次**真实故障**（2026-10）：
   // 从某些开发工具里启动时，继承来的 PSModulePath 里混进了 PowerShell 7 的
@@ -329,6 +382,56 @@ test('⭐ 读证书库的每条命令都必须带 -ErrorAction Stop（否则会�
 test('untrustCa 对空指纹安全返回，不抛错', async () => {
   assert.equal(await untrustCa(''), false)
   assert.equal(await untrustCa(null), false)
+})
+
+test('⭐ P2-2：证书删除失败必须 throw（销毁清单记 ✗），"本来就没有"才返回 false', async () => {
+  // ⚠️ 这条盯的是**假阴性**：旧实现把 certutil 删除失败 catch 成 false，而
+  //    Destroyer 把 false 当成"不适用"（清单显示 –）。于是 Root 库里明明还留着
+  //    会话 CA，用户看到的却是"清理完成"。
+  const THUMB = 'A'.repeat(40)
+
+  // ① 不存在 → false（"不适用"，不是失败）
+  assert.equal(await untrustCa(THUMB, { has: async () => false }), false,
+    '证书本来就不在时应当返回 false（不适用）')
+
+  // ② 存在但删除命令失败 → 必须抛错
+  await assert.rejects(
+    () => untrustCa(THUMB, {
+      has: async () => true,
+      pexec: async () => {
+        throw Object.assign(new Error('certutil 退出码 1'), { stderr: '拒绝访问' })
+      },
+    }),
+    (e) => e instanceof CertError && e.code === 'UNTRUST_FAILED' && /拒绝访问/.test(e.message),
+    '删除失败必须抛 CertError —— 否则销毁清单会把失败显示成"不适用"')
+
+  // ③ 命令"成功"但证书还在（certutil 用错指纹时确实会这样）→ 同样必须报失败
+  await assert.rejects(
+    () => untrustCa(THUMB, { has: async () => true, pexec: async () => ({ stdout: '' }) }),
+    (e) => e instanceof CertError && e.code === 'UNTRUST_FAILED',
+    'certutil 退出码 0 不等于删掉了 —— 必须复查')
+
+  // ④ 真的删掉 → true（第一次查存在、删完再查不存在）
+  let calls = 0
+  assert.equal(await untrustCa(THUMB, {
+    has: async () => (++calls === 1),
+    pexec: async () => ({ stdout: '' }),
+  }), true)
+  assert.equal(calls, 2, '删除前后都必须查证（先确认存在、后确认真的没了）')
+
+  // ⑤ 销毁清单里的归属：false → –（不适用），throw → ✗（失败）
+  const d = new Destroyer()
+  d.step('本来就没有的证书', () => false)
+  d.step('删除失败的证书', async () => {
+    await untrustCa(THUMB, {
+      has: async () => true,
+      pexec: async () => { throw new Error('boom') },
+    })
+  })
+  const report = await d.run()
+  assert.deepEqual(report.skipped, ['本来就没有的证书'], 'false 应当记成"不适用"')
+  assert.equal(report.failed.length, 1, 'throw 必须进 failed —— 销毁清单要能看出失败')
+  assert.match(report.failed[0], /删除失败的证书/)
 })
 
 test('removeServerCert 对空指纹安全返回', async () => {

@@ -50,8 +50,33 @@ export const MAX_MESSAGE_BYTES = (1 << 20) + 17
  */
 export const DEFAULT_MAX_MESSAGE_BYTES = (2 << 20) + 17
 
-/** 单个房间最多容纳的消息数（防滥用） */
+/**
+ * 单个房间最多容纳的消息数（防滥用）
+ *
+ * ⚠️ 条数上限**本身挡不住内存**：一条消息最大 2 MiB，4096 条就是 7.8 GiB ——
+ *    而 Worker isolate 只有约 128 MB。所以真正的护栏是下面的**字节配额**，
+ *    条数上限保留下来只是给"大量极小消息"兜个底。
+ */
 export const MAX_MESSAGES_PER_ROOM = 4096
+
+/**
+ * 单个房间允许占用的**总字节数**上限（默认 32 MiB）。
+ *
+ * ── 为什么是这个量级 ──
+ * 正常传输的在途量由发送端窗口封顶：默认窗口 8 × 2 MiB 块 ≈ 16 MiB。
+ * 32 MiB 给了 2 倍余量，既不会误伤正常传输，又远小于"4096 × 2 MiB ≈ 7.8 GiB"。
+ * 单房间超限返回 413（请求本身太大/房间满了，重试无用）。
+ */
+export const DEFAULT_MAX_BYTES_PER_ROOM = 32 << 20
+
+/**
+ * 整个 Store 允许占用的**总字节数**上限（默认 64 MiB）。
+ *
+ * Worker isolate 的内存上限约 128 MB，而 Store 活在 isolate 的模块作用域里
+ * （见 relay/worker.js）。留一半给运行时、请求体、GC 余量。
+ * 全店超限返回 507（服务端容量问题，晚点再来可能就好了）。
+ */
+export const DEFAULT_MAX_STORE_BYTES = 64 << 20
 
 /** 同时存在的房间数上限（防止内存被拖垮） */
 const MAX_ROOMS = 64
@@ -77,6 +102,8 @@ export class RoomStore {
    * @param {number} [opts.ttlMs]
    * @param {number} [opts.maxRooms]
    * @param {number} [opts.maxMessageBytes] 单条消息上限（默认 = 本项目部署的 2 MiB + 17）
+   * @param {number} [opts.maxBytesPerRoom] 单房间总字节上限（默认 32 MiB）
+   * @param {number} [opts.maxStoreBytes] 全店总字节上限（默认 64 MiB）
    * @param {() => number} [opts.now] 注入时钟，便于测试过期
    *
    * ⚠️ 关于 `maxMessageBytes`：协议**保证的最小值**是 `MAX_MESSAGE_BYTES`（1 MiB + 17），
@@ -89,9 +116,49 @@ export class RoomStore {
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
     this.maxRooms = opts.maxRooms ?? MAX_ROOMS
     this.maxMessageBytes = opts.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES
+    this.maxBytesPerRoom = opts.maxBytesPerRoom ?? DEFAULT_MAX_BYTES_PER_ROOM
+    this.maxStoreBytes = opts.maxStoreBytes ?? DEFAULT_MAX_STORE_BYTES
     this.now = opts.now ?? (() => Date.now())
-    /** @type {Map<string, {createdAt:number, updatedAt:number, messages:Array<{seq:number,data:Uint8Array,at:number}>}>} */
+    /**
+     * 全店当前占用字节数。**必须与 room.bytes 同步维护**：
+     * 任何增删消息的地方（put / putBatch / ack / destroy / 过期清理）都要改它，
+     * 漏一处就会让配额慢慢漂掉 —— 而配额漂了比没有配额更糟（以为有护栏）。
+     */
+    this.totalBytes = 0
+    /** @type {Map<string, {createdAt:number, updatedAt:number, messages:Array<{seq:number,data:Uint8Array,at:number}>, bytes:number}>} */
     this.rooms = new Map()
+  }
+
+  /** 房间被整体移除时统一扣账（destroy / 过期 / sweep 都走这里） */
+  _dropRoom(id) {
+    const room = this.rooms.get(id)
+    if (!room) return false
+    this.rooms.delete(id)
+    this.totalBytes = Math.max(0, this.totalBytes - (room.bytes ?? 0))
+    return true
+  }
+
+  /**
+   * 写入前的配额校验（单房间 + 全店）。
+   *
+   * 两种超限用**不同状态码**，因为它们对客户端的含义不同：
+   *   413（ROOM_QUOTA）—— 这个房间满了，重试无用，等接收端 ack 或换房间；
+   *   507（STORE_FULL）—— 整个中继满了，可能只是暂时的，稍后再试。
+   */
+  _assertCapacity(room, addBytes, label = '') {
+    const prefix = label ? label + '：' : ''
+    const roomAfter = (room.bytes ?? 0) + addBytes
+    if (roomAfter > this.maxBytesPerRoom) {
+      throw new RelayError(
+        `${prefix}这个房间的容量已满（${roomAfter} > ${this.maxBytesPerRoom} 字节）`,
+        'ROOM_QUOTA', 413)
+    }
+    const storeAfter = this.totalBytes + addBytes
+    if (storeAfter > this.maxStoreBytes) {
+      throw new RelayError(
+        `${prefix}中继总容量已满（${storeAfter} > ${this.maxStoreBytes} 字节），请稍后再试`,
+        'STORE_FULL', 507)
+    }
   }
 
   /** 清掉过期房间。每次访问都顺手做一次，不依赖定时器 */
@@ -99,7 +166,7 @@ export class RoomStore {
     const t = this.now()
     let removed = 0
     for (const [id, room] of this.rooms) {
-      if (t - room.updatedAt > this.ttlMs) { this.rooms.delete(id); removed++ }
+      if (t - room.updatedAt > this.ttlMs) { this._dropRoom(id); removed++ }
     }
     return removed
   }
@@ -121,7 +188,7 @@ export class RoomStore {
       throw new RelayError('房间不存在或已过期', 'NO_ROOM', 404)
     }
     if (this.now() - room.updatedAt > this.ttlMs) {
-      this.rooms.delete(id)
+      this._dropRoom(id)
       throw new RelayError('房间已过期', 'EXPIRED', 410)
     }
     return room
@@ -148,7 +215,7 @@ export class RoomStore {
     if (this.rooms.size >= this.maxRooms) {
       throw new RelayError('中继上的房间太多，请稍后再试', 'TOO_MANY_ROOMS', 503)
     }
-    room = { createdAt: this.now(), updatedAt: this.now(), messages: [], ackedBase: 0 }
+    room = { createdAt: this.now(), updatedAt: this.now(), messages: [], ackedBase: 0, bytes: 0 }
     this.rooms.set(id, room)
     return { created: true, messages: 0 }
   }
@@ -172,6 +239,8 @@ export class RoomStore {
     if (room.messages.length >= MAX_MESSAGES_PER_ROOM) {
       throw new RelayError('这个房间的消息太多了', 'ROOM_FULL', 507)
     }
+    // 字节配额是**真正的**内存护栏（条数上限挡不住 2 MiB × 4096 那种撑爆）
+    this._assertCapacity(room, data.length)
     const expected = room.ackedBase + room.messages.length
     if (seq !== expected) {
       throw new RelayError(
@@ -180,6 +249,8 @@ export class RoomStore {
         'BAD_SEQ', 409)
     }
     room.messages.push({ seq, data, at: this.now() })
+    room.bytes = (room.bytes ?? 0) + data.length
+    this.totalBytes += data.length
     room.updatedAt = this.now()
     return { seq, nextSeq: room.ackedBase + room.messages.length }
   }
@@ -210,6 +281,7 @@ export class RoomStore {
       throw new RelayError('一批最多 64 条', 'BATCH_TOO_LARGE', 413)
     }
     // 先全部校验，避免"放进去一半才报错"
+    let addBytes = 0
     for (let i = 0; i < items.length; i++) {
       const d = items[i]
       if (!(d instanceof Uint8Array)) throw new RelayError('消息内容必须是字节', 'BAD_BODY', 400)
@@ -217,16 +289,21 @@ export class RoomStore {
       if (d.length > this.maxMessageBytes) {
         throw new RelayError(`第 ${i} 条超过上限（${d.length} > ${this.maxMessageBytes} 字节）`, 'TOO_LARGE', 413)
       }
+      addBytes += d.length
     }
     if (room.messages.length + items.length > MAX_MESSAGES_PER_ROOM) {
       throw new RelayError('这个房间的消息太多了', 'ROOM_FULL', 507)
     }
+    // 整批按**总和**校验：一条 2 MiB、64 条就是 128 MiB，逐条校验挡不住
+    this._assertCapacity(room, addBytes, '这一批')
     const seqs = []
     for (const data of items) {
       const seq = room.ackedBase + room.messages.length
       room.messages.push({ seq, data, at: this.now() })
       seqs.push(seq)
     }
+    room.bytes = (room.bytes ?? 0) + addBytes
+    this.totalBytes += addBytes
     room.updatedAt = this.now()
     return { seqs, nextSeq: room.ackedBase + room.messages.length }
   }
@@ -277,7 +354,13 @@ export class RoomStore {
     }
     const count = Math.min(upToSeq + 1, available) - base
     if (count > 0) {
-      room.messages.splice(0, count)
+      const removed = room.messages.splice(0, count)
+      // ack 会真的释放内存，所以**必须同步扣账** —— 否则房间明明空了，
+      // 配额却永远回不来，正常传输会在中途被判"房间容量已满"。
+      let freed = 0
+      for (const m of removed) freed += m.data.length
+      room.bytes = Math.max(0, (room.bytes ?? 0) - freed)
+      this.totalBytes = Math.max(0, this.totalBytes - freed)
       room.ackedBase = base + count
       room.updatedAt = this.now()
     }
@@ -300,14 +383,28 @@ export class RoomStore {
 
   /** 主动销毁房间（两端任一方都能调用；"用完即销毁"的落点） */
   destroy(id) {
-    const existed = this.rooms.delete(id)
+    const existed = this._dropRoom(id)
     return { destroyed: existed }
   }
 
-  /** 维护用：当前房间数与消息总数 */
+  /** 维护用：当前房间数、消息总数与**占用字节**（运维观察配额用） */
   stats() {
     let messages = 0
-    for (const r of this.rooms.values()) messages += r.messages.length
-    return { rooms: this.rooms.size, messages, ttlMs: this.ttlMs }
+    let bytes = 0
+    for (const r of this.rooms.values()) {
+      messages += r.messages.length
+      bytes += r.bytes ?? 0
+    }
+    return {
+      rooms: this.rooms.size,
+      messages,
+      bytes,
+      // 与 bytes 相同（全店总占用），单独给出一个语义明确的名字；
+      // 让 /health 之类的运维视图不必猜"bytes 是哪个层次的"。
+      totalBytes: this.totalBytes,
+      maxBytesPerRoom: this.maxBytesPerRoom,
+      maxStoreBytes: this.maxStoreBytes,
+      ttlMs: this.ttlMs,
+    }
   }
 }

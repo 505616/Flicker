@@ -45,7 +45,14 @@ const recvMac = (authKey, ch) => createHmac('sha256', authKey)
 const sendMac = (authKey, ch) => createHmac('sha256', authKey)
   .update(Buffer.concat([Buffer.from('flicker/1/send\n'), ch])).digest()
 
-const ivFor = (i) => { const b = Buffer.alloc(12); b.writeBigUInt64BE(BigInt(i), 4); return b }
+// P0-1 线格式：IV = BE32(fileIndex) || BE64(chunkIndex)。
+// 必须与 src/suite/flicker1.js 的 chunkIV 以及网页端 dv.setUint32(0, fileIndex) 逐字节一致。
+const ivFor = (fileIndex, chunkIndex) => {
+  const b = Buffer.alloc(12)
+  b.writeUInt32BE(Number(fileIndex) >>> 0, 0)
+  b.writeBigUInt64BE(BigInt(chunkIndex), 4)
+  return b
+}
 const aadFor = (f, c, t, len) => {
   const b = Buffer.alloc(28)
   b.writeBigUInt64BE(BigInt(f), 0); b.writeBigUInt64BE(BigInt(c), 8)
@@ -60,7 +67,7 @@ function openManifest(encKey, iv, ct, tag) {
   return Buffer.concat([d.update(ct), d.final()])
 }
 function openChunk(encKey, f, c, t, ct, tag, len) {
-  const d = createDecipheriv('aes-256-gcm', encKey, ivFor(c), { authTagLength: 16 })
+  const d = createDecipheriv('aes-256-gcm', encKey, ivFor(f, c), { authTagLength: 16 })
   d.setAAD(aadFor(f, c, t, len)); d.setAuthTag(tag)
   return Buffer.concat([d.update(ct), d.final()])
 }
@@ -71,10 +78,12 @@ async function openSession(sender, password, client) {
   // 必须先访问一次页面：一次性令牌在首次访问时消费，
   // /api/session 只认已消费的令牌（见 session.js 的按端点分工）。
   await (await F(`/?k=${encodeURIComponent(sender.token)}`)).text()
-  const info = await (await F(`/api/session?k=${encodeURIComponent(sender.token)}`)).json()
+  // 页面加载后服务端种下会话级 HttpOnly cookie（P1-3），后续请求由浏览器自动带上；
+  // 这里不再需要把 ?k= 传下去（程序自己接收的路径见 src/pull.js，它走令牌）。
+  const info = await (await F('/api/session')).json()
   if (!info.salt) throw new Error('取会话参数失败: ' + JSON.stringify(info))
   const keys = derive(password, info.salt)
-  const { challenge } = await (await F(`/api/auth/start?k=${encodeURIComponent(sender.token)}`, { method: 'POST' })).json()
+  const { challenge } = await (await F('/api/auth/start', { method: 'POST' })).json()
   const mac = recvMac(keys.auth, b64(challenge))
   const fin = await F('/api/auth/finish', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -141,18 +150,34 @@ async function receiveAll({ sender, password, outDir, client, verify = true }) {
 function makeClient(caFile) {
   // 用 utf8 读成 PEM 文本 —— Node 的 ca 选项要的是 PEM，不是 DER
   const ca = readFileSync(caFile, 'utf8')
+  // 极简 cookie jar：模拟浏览器的「页面种 cookie，后续请求自动带上」行为。
+  // P1-3 之后 /api/session 与 /api/auth/start 认的就是这个 cookie，测试必须像真浏览器一样带上。
+  const jar = new Map()
+  const rememberCookies = (res) => {
+    const raw = res.headers['set-cookie']
+    for (const line of Array.isArray(raw) ? raw : raw ? [raw] : []) {
+      const [pair] = String(line).split(';')
+      const eq = pair.indexOf('=')
+      if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim())
+    }
+  }
   return function req(method, url, init) {
     if (typeof method !== 'string') {
       throw new Error(`client() 的第一个参数必须是 HTTP 方法字符串，收到 ${typeof method}`)
     }
     if (typeof url !== 'string') throw new Error(`client() 的 url 必须是字符串`)
     const { headers = {}, body } = init ?? {}
+    const sendHeaders = { ...headers }
+    if (!sendHeaders.Cookie && !sendHeaders.cookie && jar.size) {
+      sendHeaders.Cookie = [...jar].map(([k, v]) => `${k}=${v}`).join('; ')
+    }
     const u = new URL(url)
     return new Promise((resolve, reject) => {
       const r = httpsRequest({
         method, host: u.hostname, port: u.port || 443,
-        path: u.pathname + u.search, ca, headers,
+        path: u.pathname + u.search, ca, headers: sendHeaders,
       }, (res) => {
+        rememberCookies(res)
         const chunks = []
         res.on('data', (c) => chunks.push(c))
         res.on('end', () => {
@@ -453,6 +478,51 @@ test('按端点分工的认证：未认证拿不到清单与分块', { timeout: 
     assert.ok(r.status >= 400, `越界序号 ${seq} 应被拒绝，实际 ${r.status}`)
     await r.text()
   }
+})
+
+test('⭐ P1-3：/api/session 与 /api/auth/start 只给真正打开过链接的客户端（会话 cookie）',
+  { timeout: 180000 }, async () => {
+  const work = await makeTree()
+  const { sender } = await boot(sendArgs(path.join(work, 'src', 'hello.txt')), work)
+
+  // ① 从没打开过页面（没有 cookie、也没有 k）：不能拿到盐与加密清单。
+  //    旧实现只检查 session.tokenConsumed —— 页面一打开，同网段任何人都能 200 拿到
+  //    盐 + 清单密文，在本地离线爆破密码（绕过在线 5 次上限）。
+  const stranger = makeClient(sender.certFile)
+  const bare = await stranger('GET', `${sender.base}/api/session`)
+  assert.equal(bare.status, 403, '没打开过链接的客户端必须被拒（旧实现这里返回 200）')
+  const bareBody = await bare.text()
+  assert.ok(!/"salt"/.test(bareBody), `响应里不能出现 salt：${bareBody}`)
+  assert.ok(!/"manifest"/.test(bareBody), `响应里不能出现 manifest：${bareBody}`)
+
+  // ② 带一个错的 cookie：同样拒绝（不能"有 cookie 就放行"）
+  const wrong = await stranger('GET', `${sender.base}/api/session`, {
+    headers: { Cookie: 'flicker_session=not-the-real-cookie' },
+  })
+  assert.equal(wrong.status, 403)
+  const wrongBody = await wrong.text()
+  assert.ok(!/"salt"|"manifest"/.test(wrongBody), `错误 cookie 也不能泄露参数：${wrongBody}`)
+
+  // ③ 正常打开页面：服务端把一次性令牌换成会话级 HttpOnly cookie
+  const browser = makeClient(sender.certFile)
+  const page = await browser('GET', `${sender.base}/?k=${encodeURIComponent(sender.token)}`)
+  assert.equal(page.status, 200)
+  const setCookie = String(page.headers.get('set-cookie') ?? '')
+  assert.ok(setCookie.includes('flicker_session='), '页面加载必须种下会话 cookie')
+  assert.ok(/HttpOnly/i.test(setCookie), 'cookie 必须是 HttpOnly（脚本读不到）')
+  assert.ok(/SameSite=Strict/i.test(setCookie), '必须是 SameSite=Strict（挡跨站请求）')
+  assert.ok(/Secure/i.test(setCookie), '生产路径是 HTTPS，cookie 必须带 Secure')
+  await page.text()
+
+  // ④ 浏览器只带 cookie、不带 ?k= 也能取参数 / 发起认证
+  const ok = await browser('GET', `${sender.base}/api/session`)
+  assert.equal(ok.status, 200, '带正确 cookie 必须拿到会话参数')
+  const info = await ok.json()
+  assert.ok(info.salt, '盐必须给（派生密钥要用）')
+  assert.ok(info.manifest?.ct, '加密清单必须给')
+  const start = await browser('POST', `${sender.base}/api/auth/start`)
+  assert.equal(start.status, 200, '带正确 cookie 才能发起认证')
+  assert.ok((await start.json()).challenge)
 })
 
 test('篡改的密文会被 GCM 拒绝（真实 HTTP 层验证）', { timeout: 180000 }, async () => {

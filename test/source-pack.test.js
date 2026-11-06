@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -65,6 +65,44 @@ test('真仓库：打出来的包结构完整且不可含禁止项（不打第�
   const { missing, forbidden } = packStructureProblems({ names, need: requiredFiles(ROOT) })
   assert.deepEqual(missing, [], '真包的必需文件都在')
   assert.deepEqual(forbidden, [], '真包里不该有禁止项')
+})
+
+test('⭐ npm 安装包（package.json files）包含赠品/构建所需源码，且不含敏感与临时文件', () => {
+  // 2026-10 的事故：`npm install -g flicker-transfer` 装出来的包里**没有**
+  // gen/、entry/、relay/ —— 而 `src/gift.js` 对用户承诺"源码 + 全部文档，
+  // 可以自己看、自己改、自己构建"。npm 全局安装的用户一送赠品，对方收到的
+  // 源码包缺构建脚本与中继代码，按说明构建必然失败。
+  //
+  // 这条只做**静态**包含性断言（不动网络、不跑 npm）；真正的打包结果
+  // 用 `npm pack --dry-run --json` 人工/CI 核一次即可。
+  const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+  const files = pkg.files ?? []
+  for (const need of [
+    'gen/', 'entry/', 'docs/', '中文文档/',
+    '启动.cmd', '启动.sh', '启动.command',
+  ]) {
+    assert.ok(files.includes(need), `package.json 的 files 里应当有 ${need} —— npm 安装后赠品/构建要用它`)
+  }
+  // ⚠️ 反过来：不能图省事写成整个 'relay/' 或 '_lab/' 目录 ——
+  //    relay/ 可能带着 api-token.txt 与 .wrangler/（凭据），_lab/ 带着 _tmp-*.py（一次性补丁脚本）。
+  //    所以用 glob 白名单，并钉住它真的覆盖了源码后缀。
+  assert.ok(!files.includes('relay/'), 'relay/ 必须按后缀白名单列出（否则会把 api-token.txt 打进安装包）')
+  assert.ok(!files.includes('_lab/'), '_lab/ 必须按后缀白名单列出（否则 _tmp-*.py 会进安装包）')
+  for (const pat of ['relay/*.mjs', 'relay/*.js', 'relay/*.toml', 'relay/package.json']) {
+    assert.ok(files.includes(pat), `files 里应当有 ${pat}`)
+  }
+  // 构建/赠品链路实际会读到的几个关键文件，必须真的能匹配到上面某个模式
+  const patterns = files.filter((f) => f.startsWith('relay/'))
+  const covered = (rel) => patterns.some((p) => {
+    if (p === rel) return true
+    const star = p.indexOf('*')
+    if (star < 0) return false
+    return rel.startsWith(p.slice(0, star)) && rel.endsWith(p.slice(star + 1))
+  })
+  for (const rel of ['relay/worker.js', 'relay/local.mjs', 'relay/deploy.mjs',
+    'relay/page.generated.js', 'relay/sender.generated.js', 'relay/wrangler.toml']) {
+    assert.ok(covered(rel), `relay 白名单没有覆盖 ${rel} —— 中继部署会缺文件`)
+  }
 })
 
 test('整条判据（含"解开后真的跑一次"）在真仓库上通过', async () => {

@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { request as httpsRequest } from 'node:https'
@@ -242,4 +242,42 @@ test('接收模式遇到同名文件：不问的时候自动改名，旧文件�
   const got = await readFile(path.join(dir, 'inbox', 'a (1).txt'))
   assert.equal(got.toString('utf8'), sent.toString('utf8'),
     '新文件应当落在 a (1).txt（序号在扩展名之前，与发送端同一套去重规则）')
+})
+// ── ④ 用法错误：重复选项 / 裸选项 / 非法时长（P2-4 / P2-10 / P3-5）──
+
+test('⭐ 同一个带值选项给两次 → 明确报错，不静默用默认值（P2-4）', () => {
+  // 从前重复项会被收成数组，而消费点全是 typeof === 'string' —— 数组一路落空：
+  // 用户明确指定的 --dir 被丢掉、文件存到了默认目录，而且没有任何提示。
+  const r = spawnSync(process.execPath, [CLI, 'recv', '--dir=A', '--dir=B'],
+    { encoding: 'utf8', timeout: 20000 })
+  assert.equal(r.status, 2, `重复指定应当按用法错误退出（实际 ${r.status}）：${r.stderr}`)
+  assert.match(r.stderr, /不止一次|重复/, '要说清是重复指定了')
+  assert.match(r.stderr, /--dir/, '要指出是哪个选项')
+})
+
+test('⭐ 裸的带值选项 → 报缺值并退出 2，而不是 Number(true)=1（P2-10）', () => {
+  for (const flag of ['--port', '--window', '--max-files', '--max-bytes', '--timeout']) {
+    const r = spawnSync(process.execPath, [CLI, 'send', flag],
+      { encoding: 'utf8', timeout: 20000 })
+    assert.equal(r.status, 2, `${flag} 应当按用法错误退出（实际 ${r.status}）：${r.stderr}`)
+    assert.match(r.stderr, /要跟值/, `${flag} 的报错要说清是缺值`)
+  }
+})
+
+test('非法 --timeout 按用法错误退出（2），不是 1（P3-5）', () => {
+  const r = spawnSync(process.execPath, [CLI, 'recv', '--timeout=abc'],
+    { encoding: 'utf8', timeout: 20000 })
+  assert.equal(r.status, 2, `非法时长应当按用法错误退出（实际 ${r.status}）：${r.stderr}`)
+  assert.match(r.stderr, /看不懂的时长/)
+})
+
+test('CLI：recv <链接> 下 --plugin 明确告知"插件不生效"（P2-5）', async () => {
+  const dir = await workdir('recv-cli-plugin')
+  const plugin = path.join(dir, 'p.cjs')
+  await writeFile(plugin, 'module.exports = { name: "p", apiVersion: 1, apply() {} }', 'utf8')
+  const r = spawnSync(process.execPath,
+    [CLI, `--plugin=${plugin}`, 'recv', '这不是链接'],
+    { encoding: 'utf8', timeout: 20000 })
+  assert.equal(r.status, 2, `链接非法应当退出 2（实际 ${r.status}）：${r.stderr}`)
+  assert.match(r.stderr, /插件不会生效/, 'pull 链路不发插件事件，必须明确说出来')
 })

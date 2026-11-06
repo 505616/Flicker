@@ -89,3 +89,22 @@ test('自定义密码的场景下提示也清楚', async () => {
   const { out } = await askWith(['x', 'x'])
   assert.match(out, /想自己设定就输入自定义密码/, '要告诉用户可以自己设')
 })
+
+// ── 默认密码强度（P1-3 后半）────────────────────────────
+
+test('⭐ 默认 4 词密码的熵必须 ≥ 32 bit（词表 256 个词 = 每词 8 bit）', async () => {
+  // 旧词表只有 37 个词 → 每词约 5.2 bit，4 词 ≈ 20.8 bit。
+  // 而 /api/session 曾经只要页面打开过就给盐 + 加密清单，等价于把爆破搬到离线，
+  // 20.8 bit 在 GPU 面前几乎等于没有。把词表扩到 256 词，4 词正好 32 bit。
+  const { WORDS, suggestPassword } = await import('../src/suite/flicker1.js')
+  assert.equal(WORDS.length, 256, `词表必须是 256 个词（现在 ${WORDS.length} 个）`)
+  assert.equal(new Set(WORDS).size, WORDS.length, '词表不能有重复，否则实际熵打折')
+  assert.ok(WORDS.every((w) => /^[a-z]{3,}$/.test(w)),
+    '每个词都要是小写英文、至少 3 个字母（好念好打，也能被终端/输入法稳定处理）')
+
+  const bits = Math.log2(WORDS.length) * 4
+  assert.ok(bits >= 32, `4 词默认密码的熵必须 ≥ 32 bit，实际 ${bits} bit`)
+
+  // UX 不变：仍然是 4 个词 + 短横线（不要把用户逼去手抄 26 个随机字符）
+  assert.match(suggestPassword(), /^[a-z]+(-[a-z]+){3}$/)
+})

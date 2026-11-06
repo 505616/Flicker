@@ -34,6 +34,8 @@
   const MIN_MESSAGE = (1 << 20) + 17
   /** 分块上限：比它更大没有收益（见 src/chunk-size.js 的实测） */
   const MAX_CHUNK = 4 << 20
+  /** 清单最多拆成几条（与 src/relay/protocol.js 的 MAX_MANIFEST_PARTS 一致） */
+  const MAX_MANIFEST_PARTS = 1024
 
   // ── 字节拼装（与 protocol.js 的 packMessage / packBatch 同格式）────────
 
@@ -63,6 +65,37 @@
       parts.push(len, it)
     }
     return concatAll(parts)
+  }
+
+  /**
+   * 清单分帧（P1-2）——与 `src/relay/protocol.js` 的 packManifestParts
+   * 以及网页接收端**逐字节一致**，三处任何一处改动都必须同步。
+   *
+   *   第 i 条（占 seq=i）= BE32(i) || BE32(partCount) || M.slice(i*partSize, …)
+   *   这条消息**不带**类型字节（类型字节在 M 的第一字节里）。
+   *   M 就是原来那条完整清单消息，序列化方式不变。
+   */
+  function packManifestParts(manifestMessage, maxMessageBytes) {
+    const max = Number.isInteger(maxMessageBytes) && maxMessageBytes > 9 ? maxMessageBytes : 9
+    const partSize = max - 8
+    const partCount = Math.max(1, Math.ceil(manifestMessage.length / partSize))
+    if (partCount > MAX_MANIFEST_PARTS) {
+      throw Object.assign(new Error(
+        `清单太大：${manifestMessage.length} 字节需要拆成 ${partCount} 条（上限 ${MAX_MANIFEST_PARTS} 条），` +
+        '请减少文件数量后分批发送'), { code: 'MANIFEST_TOO_LARGE' })
+    }
+    const out = []
+    for (let i = 0; i < partCount; i++) {
+      const start = i * partSize
+      const end = Math.min(manifestMessage.length, start + partSize)
+      const msg = new Uint8Array(8 + (end - start))
+      const dv = new DataView(msg.buffer)
+      dv.setUint32(0, i)
+      dv.setUint32(4, partCount)
+      msg.set(manifestMessage.subarray(start, end), 8)
+      out.push(msg)
+    }
+    return out
   }
 
   /**
@@ -114,6 +147,21 @@
       this.room = null
       this.salt = null
       this.manifest = null
+      /** 中继声明的单条消息上限（清单分帧按它切） */
+      this.maxMessageBytes = MIN_MESSAGE
+      /** 清单被拆成了几条（数据块从 seq = manifestParts 开始） */
+      this.manifestParts = 1
+      /**
+       * 正在飞的那一批投递（与 Node 端 `client._inFlight` 同一个理由）：
+       * `stop()` 里的 DELETE 若不先等它，就会与在途 POST 抢同一个房间 ——
+       * 服务端先删、后到的 POST 拿 404，一次正常的"取消"被报成中继错误。
+       */
+      this._inFlight = null
+    }
+
+    /** 本次传输的总消息数（清单分片 + 数据块） */
+    get totalMessages() {
+      return this.manifestParts + (this.manifest?.totalChunks ?? 0)
     }
 
     _emit(e) { try { this.onEvent(e) } catch { /* 回调里的异常不能影响传输 */ } }
@@ -139,7 +187,8 @@
       if (e.code === 'ABORTED') return false
       const fatal = ['NO_ROOM', 'EXPIRED', 'GONE', 'NOT_YET', 'BAD_SEQ', 'BAD_ROOM_ID',
         'TOO_LARGE', 'BAD_BODY', 'EMPTY_BODY', 'EMPTY_BATCH', 'BATCH_TOO_LARGE', 'BAD_BATCH',
-        'ROOM_TAKEN']
+        'ROOM_TAKEN', 'ROOM_FULL', 'ROOM_QUOTA', 'STORE_FULL', 'MANIFEST_TOO_LARGE',
+        'SEQ_DESYNC']
       if (typeof e.code === 'string' && fatal.includes(e.code)) return false
       if (typeof e.status === 'number') return e.status >= 500 || e.status === 429
       // fetch 的网络层失败抛 TypeError；超时是 TimeoutError/AbortError
@@ -182,6 +231,8 @@
 
       // 块大小要按中继上限裁剪，而且必须在扫描之前定下来（清单里的 chunkBytes 依赖它）
       const cap = await this._caps()
+      // 清单分帧也按这个上限切（创建响应里若声明得更小，下面还会校正）
+      this.maxMessageBytes = cap
       this.chunkBytes = Math.max(64 << 10, Math.min(MAX_CHUNK, cap - 17))
       this._emit({ type: 'caps', chunkBytes: this.chunkBytes, maxMessageBytes: cap })
 
@@ -210,6 +261,7 @@
       })
       if (Number.isInteger(created.maxMessageBytes) && created.maxMessageBytes > 0) {
         // 创建响应里的声明更权威：块大小已经算过，这里只在必要时再收紧一次
+        this.maxMessageBytes = created.maxMessageBytes
         const allowed = created.maxMessageBytes - 17
         if (allowed >= 64 << 10 && allowed < this.chunkBytes) {
           this.chunkBytes = allowed
@@ -223,8 +275,17 @@
         }
       }
 
+      // ── 清单分帧（P1-2，与 Node 发送端/接收端逐字节一致）──
+      // M 是原来那条完整清单消息；按中继声明的单条上限切成 N 条。
+      // 注意：**一条都不例外**，清单很小也会带 8 字节分片头（partCount=1），
+      // 这样接收端只有一种格式要处理。
+      // ⚠️ 这里必须存**条数**（.length），不是分片数组本身：
+      //    后面的 totalMessages / 数据块序号偏移都要拿它做算术。
+      const parts = packManifestParts(this.manifestMessage, this.maxMessageBytes)
+      this.manifestParts = parts.length
+
       if (created.created) {
-        await this._withRetry('manifest', () => this._put(0, this.manifestMessage))
+        await this._putManifestParts(parts)
       } else {
         // 房间已存在：空房间 = 我们的创建响应丢了（补投清单）；非空 = 别人占了这个名字
         const st = await this._withRetry('status', () => this._status())
@@ -233,7 +294,7 @@
             '这个会话的房间名已经被占用了 —— 房间里已经有别人的消息。请换一个密码重新开始。'),
           { code: 'ROOM_TAKEN' })
         }
-        await this._withRetry('manifest', () => this._put(0, this.manifestMessage))
+        await this._putManifestParts(parts)
       }
 
       const st = await this._withRetry('status', () => this._status())
@@ -241,7 +302,7 @@
       this.ackedBase = st.ackedBase
       this.bytesPosted = 0
 
-      this._emit({ type: 'ready', link: this.link(), total: 1 + this.manifest.totalChunks,
+      this._emit({ type: 'ready', link: this.link(), total: this.totalMessages,
         bytes: this.manifest.totalBytes, files: this.files.length })
       return this.link()
     }
@@ -257,7 +318,53 @@
     }
 
     async _put(seq, message) {
-      await this._fetch(`${this.base}/r/${this.room}?seq=${seq}`, { method: 'POST', body: message })
+      // 也记入 _inFlight：取消可能发生在投清单阶段（start() 里），
+      // stop() 的 DELETE 必须先等它落定，否则会抢同一个房间。
+      const p = this._fetch(`${this.base}/r/${this.room}?seq=${seq}`, { method: 'POST', body: message })
+      this._inFlight = p
+      try { await p } finally { this._inFlight = null }
+    }
+
+    /** 按序投递所有清单分片（seq = 0..parts.length-1） */
+    async _putManifestParts(parts) {
+      for (let i = 0; i < parts.length; i++) {
+        await this._putManifestPart(i, parts[i])
+      }
+    }
+
+    /**
+     * 投递一个清单分片，并在重试/撞 409 时先对齐服务端（P2-1）。
+     *
+     * 旧行为是"重试仍然是 POST ?seq=0"：第一次已落库、响应丢了时，
+     * 重发会撞 409 BAD_SEQ（不可重试）→ 整次传输在开局失败。
+     * 判据与 Node 端一致：服务端 nextSeq 是唯一权威（i+1 = 已落库，i = 重发）。
+     */
+    async _putManifestPart(i, part) {
+      const wantNext = i + 1
+      try {
+        await this._withRetry('manifest', async (attempt) => {
+          if (attempt > 0) {
+            const st = await this._status().catch(() => null)
+            if (st) {
+              if (st.nextSeq === wantNext) return
+              if (st.nextSeq !== i) throw this._desyncErr(i, st.nextSeq)
+            }
+          }
+          await this._put(i, part)
+        })
+      } catch (e) {
+        if (e.code !== 'BAD_SEQ') throw e
+        const st = await this._status().catch(() => null)
+        if (st && st.nextSeq === wantNext) return
+        if (st && st.nextSeq !== i) throw this._desyncErr(i, st.nextSeq)
+        throw e
+      }
+    }
+
+    _desyncErr(expectedNext, actualNext) {
+      return Object.assign(new Error(
+        `清单投递序号错乱：期望 nextSeq=${expectedNext}，服务端是 ${actualNext}`),
+      { code: 'SEQ_DESYNC' })
     }
 
     /**
@@ -331,14 +438,15 @@
 
     /** 一批投递：把 [startSeq, startSeq+count) 逐块加密、包成 batch 发出去 */
     async _putBatch(startSeq, count) {
-      const total = 1 + this.manifest.totalChunks
+      const total = this.totalMessages
       const items = []
       const meta = []
       for (let i = 0; i < count; i++) {
         if (this.stopped) throw Object.assign(new Error('已取消'), { code: 'ABORTED' })
         const seq = startSeq + i
         if (seq >= total) break
-        const { file, chunkIndex, plainLen } = this._locate(seq - 1)
+        // 数据块全局序号从清单分片之后开始（旧协议写死 -1）
+        const { file, chunkIndex, plainLen } = this._locate(seq - this.manifestParts)
         const off = chunkIndex * file.chunkBytes
         const plain = new Uint8Array(await file._file.slice(off, off + plainLen).arrayBuffer())
         if (plain.length !== plainLen) {
@@ -349,10 +457,21 @@
         items.push(packMessage(MSG.CHUNK, concatAll([tag, ct])))
         meta.push({ seq, fileIndex: file.index ?? this._indexOf(file), chunkIndex, bytes: plainLen, fileName: file.rel })
       }
-      if (!items.length) return { chunks: [], aborted: true }
+      if (!items.length || this.stopped) return { chunks: [], aborted: true }
 
       const body = packBatch(items)
       const wantNext = startSeq + items.length
+      const sendOnce = async () => {
+        // 记录在途请求：stop()/destroy() 发 DELETE 前必须先等它结束，
+        // 否则 DELETE 会与这条 POST 抢同一个房间（正常的取消会被报成 404）。
+        const p = this._fetch(`${this.base}/r/${this.room}/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body,
+        })
+        this._inFlight = p
+        try { return await p } finally { this._inFlight = null }
+      }
       let landed = null
       const r = await this._withRetry('batch', async (attempt) => {
         if (attempt > 0 && !landed) {
@@ -365,11 +484,7 @@
               { code: 'SEQ_DESYNC', status: 0, cause: null })
           }
         }
-        return this._fetch(`${this.base}/r/${this.room}/batch`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body,
-        })
+        return sendOnce()
       }, 4)
       const j = landed ?? await r.json()
       this.posted = Math.max(this.posted, j.nextSeq)
@@ -389,12 +504,13 @@
      *    这条在 Node 侧踩过（实测 posted=6/total=6/pending=0 而 ackedBase=5 → 误报完成）。
      */
     async run({ timeoutMs = 15 * 60 * 1000 } = {}) {
-      const total = 1 + this.manifest.totalChunks
+      const total = this.totalMessages
       let idleSince = Date.now()
       let idleRounds = 0
       let lastAcked = this.ackedBase
       let lastPosted = this.posted
 
+      try {
       while (!this.stopped) {
         if (Date.now() - idleSince > timeoutMs) {
           this._emit({ type: 'incomplete', reason: 'timeout', posted: this.posted, ackedBase: this.ackedBase, total })
@@ -422,9 +538,10 @@
           return { ok: true, posted: this.posted }
         }
         if (!sentSomething) idleRounds++
-        // 需要新 ack（或这一轮没投）时才问状态 —— 这是唯一会等一个往返的地方
+        // 需要新 ack（或这一轮没投）时才问状态 —— 这是唯一会等一个往返的地方。
+        // ⚠️ P1-4：状态轮询也走重试；一次瞬时 5xx/网络抖动不该废掉整次传输。
         if (!sentSomething || Math.max(0, this.windowSize - (this.posted - this.ackedBase)) === 0) {
-          const st = await this._status()
+          const st = await this._withRetry('status', () => this._status())
           if (st.ackedBase > lastAcked || this.posted !== lastPosted) {
             lastAcked = st.ackedBase; lastPosted = this.posted
             idleSince = Date.now()
@@ -436,7 +553,11 @@
             this._emit({ type: 'complete', posted: this.posted, bytes: this.bytesPosted })
             return { ok: true, posted: this.posted }
           }
-          if (Math.max(0, this.windowSize - (this.posted - this.ackedBase)) === 0) {
+          // ⚠️ P1-1：没有新数据可投时也必须等 pollMs（与 Node 端同一修法）。
+          //    旧条件只判"窗口满"，于是数据全投完、在等最后几个 ack 时会以
+          //    往返速度死循环 status（浏览器标签页 CPU 打满、中继免费额度烧光）。
+          if (!sentSomething ||
+              Math.max(0, this.windowSize - (this.posted - this.ackedBase)) === 0) {
             await this._sleep(this.pollMs)
           }
         }
@@ -444,6 +565,17 @@
           this._emit({ type: 'complete', posted: this.posted, bytes: this.bytesPosted })
           return { ok: true, posted: this.posted }
         }
+      }
+      } catch (e) {
+        // 取消是**正常结束路径**，run() 绝不能 reject —— 页面的 .catch 会把它
+        // 显示成红色"出错了：已取消"，盖掉刚显示的正确提示（P2-6）。
+        const aborted = (e && e.code === 'ABORTED') ||
+          (this.stopped && e &&
+            (e.code === 'NO_ROOM' || e.code === 'EXPIRED' || e.status === 404 || e.status === 410))
+        if (!aborted) throw e
+        this._emit({ type: 'incomplete', reason: 'aborted', posted: this.posted,
+          ackedBase: this.ackedBase, total })
+        return { ok: false, reason: 'aborted' }
       }
       this._emit({ type: 'incomplete', reason: 'aborted', posted: this.posted,
         ackedBase: this.ackedBase, total })
@@ -453,6 +585,9 @@
     /** 用户取消：停循环 + 删房间（房间没了，链接立即失效） */
     async stop() {
       this.stopped = true
+      // 先等在途的 /batch 落定，再 DELETE —— 否则两个请求抢同一个房间，
+      // 一次正常的取消会以 NO_ROOM 的形式冒出来（Node 端已修过同一个竞态）。
+      if (this._inFlight) await this._inFlight.catch(() => {})
       try {
         await this._fetch(`${this.base}/r/${this.room}`, { method: 'DELETE' })
       } catch { /* 已经没了就算了 */ }
@@ -462,6 +597,7 @@
 
     /** 传完后销毁房间（与 stop 的区别只是语义：正常完成 vs 取消） */
     async destroy() {
+      if (this._inFlight) await this._inFlight.catch(() => {})
       try {
         await this._fetch(`${this.base}/r/${this.room}`, { method: 'DELETE' })
         return true

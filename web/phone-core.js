@@ -185,10 +185,23 @@
     return b
   }
 
-  /** 每块 IV = 12 字节，前 4 字节为 0，后 8 字节为块号 */
-  function chunkIV(chunkIndex) {
+  /**
+   * 每块 IV = 12 字节：BE32(fileIndex) ‖ BE64(chunkIndex)。
+   *
+   * ⚠️ 前 4 字节**必须**是文件序号，不能像从前那样留 0：
+   *    整个会话共用一把 keys.enc，而一次通常传多个文件。只按"文件内块号"取 IV 时，
+   *    文件 0 的第 0 块与文件 1 的第 0 块用的是同一个 GCM nonce ——
+   *    密文异或泄露两份明文的异或关系，还能做 forbidden attack 恢复认证密钥。
+   *    把 fileIndex 编进来之后，"同文件不同块"与"不同文件同块"的 IV 一定不同。
+   *
+   * 文件序号用 32 位写（与 Node 侧 writeUInt32BE、接收页 setUint32(0, …) 逐字节一致）；
+   * 块号仍按 64 位写 —— JS 位运算会在 32 位处静默截断。
+   */
+  function chunkIV(fileIndex, chunkIndex) {
     const iv = new Uint8Array(PARAMS.ivBytes)
-    new DataView(iv.buffer).setBigUint64(4, BigInt(chunkIndex))
+    const dv = new DataView(iv.buffer)
+    dv.setUint32(0, fileIndex >>> 0)
+    dv.setBigUint64(4, BigInt(chunkIndex))
     return iv
   }
 
@@ -199,7 +212,7 @@
    * @returns {Promise<{ct:Uint8Array, tag:Uint8Array}>} 与 Node 侧 sealChunk 的输出一致
    */
   async function sealChunk(encKey, fileIndex, chunkIndex, totalChunks, plain) {
-    const iv = chunkIV(chunkIndex)
+    const iv = chunkIV(fileIndex, chunkIndex)
     const aad = chunkAAD(fileIndex, chunkIndex, totalChunks, plain.length)
     const out = new Uint8Array(await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 }, encKey, plain))

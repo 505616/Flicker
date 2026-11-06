@@ -204,7 +204,7 @@ body{display:flex;justify-content:center;align-items:center;padding:28px 16px}  
 
 **2. 默认生成强密码，而不是让用户自己想**
 `correct-horse-battery-staple` 这种 4 词密码：
-- 约 52 bit 熵 —— 对几分钟生命周期的会话足够了（且限速 + 5 次自动销毁）
+- 按每词 8 bit 计**约 32 bit** 熵（4 个词；词表见 `src/suite/flicker1.js` 的 `WORDS`）。对拿到盐与密文的离线攻击者**不是**"不可猜"—— 算法见 `SECURITY.md` §4.2/§5.6 —— 但密码只在几分钟内有效、链接一次性、错 5 次即销毁会话
 - **对人是可读、可念、可手打的** —— 用户可以电话念给对方，或微信发过去
 - 提醒：默认密码可以直接回车接受，想自己设定就打字
 

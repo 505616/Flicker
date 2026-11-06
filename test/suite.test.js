@@ -206,9 +206,49 @@ test('分块：换一把钥匙必然失败', () => {
 
 test('IV 派生：同一文件内块序号不同 → IV 不同（绝不重用 IV）', () => {
   const ivs = new Set()
-  for (let i = 0; i < 5000; i++) ivs.add(chunkIV(i).toString('hex'))
+  for (let i = 0; i < 5000; i++) ivs.add(chunkIV(0, i).toString('hex'))
   assert.equal(ivs.size, 5000, 'IV 必须逐块唯一，否则 GCM 会灾难性失效')
-  assert.equal(chunkIV(0).length, 12)
+  assert.equal(chunkIV(0, 0).length, 12)
+})
+
+test('⭐ P0-1：跨文件同一块号的 IV 必须不同（否则同一会话内 GCM nonce 复用）', () => {
+  // 旧实现 `chunkIV(chunkIndex)` 前 4 字节恒为 0 —— 文件 0 与文件 1 的第 0 块
+  // 拿同一个 nonce 加密。这里把"跨文件唯一"钉成断言，防止有人把它改回去。
+  const seen = new Set()
+  for (let f = 0; f < 64; f++) {
+    for (let c = 0; c < 8; c++) seen.add(chunkIV(f, c).toString('hex'))
+  }
+  assert.equal(seen.size, 64 * 8, '同一会话内 (fileIndex, chunkIndex) → IV 必须一一对应')
+  assert.notDeepEqual(chunkIV(0, 0), chunkIV(1, 0),
+    '不同文件的第 0 块绝不能共用 IV —— 那就是 GCM nonce 复用')
+})
+
+test('⭐ P0-1：IV 的线格式是 BE32(fileIndex) || BE64(chunkIndex)（与浏览器 setUint32 逐字节一致）', () => {
+  const iv = chunkIV(0x01020304, 0x0102030405060708n)
+  assert.equal(iv.length, 12)
+  assert.equal(iv.readUInt32BE(0), 0x01020304,
+    '文件序号必须写成 32 位大端（浏览器端是 dv.setUint32(0, fileIndex)）')
+  assert.equal(iv.readBigUInt64BE(4), 0x0102030405060708n,
+    '块序号继续用 64 位大端，避免 32 位截断')
+  // 反向：非 0 文件的 IV 不能还等于"旧格式只写块号"（旧实现所有文件都长这样）
+  const oldStyle = Buffer.alloc(12)
+  oldStyle.writeBigUInt64BE(7n, 4)
+  assert.notDeepEqual(chunkIV(3, 7), oldStyle,
+    '文件 3 的第 7 块必须带文件序号前缀，不能再是旧格式那份字节')
+  assert.notDeepEqual(chunkIV(3, 7), chunkIV(0, 7))
+})
+
+test('⭐ P0-1：跨文件同块号不再满足 C1⊕C2 == P1⊕P2（旧实现可复现的 nonce 复用）', () => {
+  const key = randomBytes(32)
+  const p1 = Buffer.alloc(32, 0x41)   // 两段等长明文，方便做异或比较
+  const p2 = Buffer.alloc(32, 0x42)
+  const a = sealChunk(key, 0, 0, 1, p1)
+  const b = sealChunk(key, 1, 0, 1, p2)
+  const xor = (x, y) => Buffer.from(x.map((v, i) => v ^ y[i]))
+  assert.notDeepEqual(xor(a.ct, b.ct), xor(p1, p2),
+    '不同文件同块号的密文异或 == 明文异或 —— 说明 IV 又复用了（GCM 灾难性失效）')
+  // 对照：同一文件同一块号是确定性的（GCM 流密码特性），这不是 bug，顺便钉住前提
+  assert.deepEqual(sealChunk(key, 0, 0, 1, p1).ct, a.ct)
 })
 
 // ── 那个很隐蔽的 32 位截断陷阱 ──────────────────────────────
@@ -299,6 +339,6 @@ test('suggestPassword 产出好念的密码，且有足够随机性', () => {
   assert.match(pw, /^[a-z]+-[a-z]+-[a-z]+-[a-z]+$/, '应为 4 个单词、连字符分隔')
   const seen = new Set()
   for (let i = 0; i < 3000; i++) seen.add(suggestPassword())
-  // 40 个词取 4 个 → 约 2^21 种组合；3000 个样本里碰撞应当很少
+  // 256 个词取 4 个 → 2^32 种组合；3000 个样本里碰撞应当极少
   assert.ok(seen.size > 2990, `随机性不足：3000 次只产生了 ${seen.size} 个不同密码`)
 })

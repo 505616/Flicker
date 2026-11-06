@@ -33,7 +33,7 @@ import { primaryIPv4 } from './trust.js'
 import { readAsset, ASSET } from './assets.js'
 import { detectSelf } from './gift.js'
 // ⚠️ 静态 import —— 动态 import 的相对路径进不了单文件产物（见 bin/flicker.js 顶部的说明）
-import { bindSignals, Destroyer } from './destroy.js'
+import { Destroyer, EXIT } from './destroy.js'
 import { cleanAllLeftovers, cleanTempDirs } from './trust.js'
 import { runSend } from './run.js'
 import { startReceiveService, defaultSaveDir, waitForReceive } from './recv.js'
@@ -42,6 +42,7 @@ import { pickFolder } from './native-pick.js'
 import { dedupePath } from './manifest.js'
 import { compareKeyOf } from './path-safety.js'
 import { BROWSER_QR_SOURCE } from './tty.js'
+import { createPluginRegistry } from './plugin/registry.js'
 
 
 // ── 浏览器探测 ──────────────────────────────────────────────
@@ -207,6 +208,26 @@ export async function runGui(opts = {}) {
     pullRun: null,          // 后台跑的 promise
   }
 
+  /**
+   * 克隆一份**只用于这一场传输**的插件注册表（P2-1）。
+   *
+   * 为什么必须克隆：注册表的 `dispose()` 会把订阅全部 off 掉，而且 `apply()`
+   * 不允许跑第二遍 —— 但界面进程要比一场传输活得久（传完还能「再传一次」、
+   * 接收模式也能反复起停）。从前界面直接把入口那份注册表交出去，第一场结束后
+   * 插件就永久静默失效，而状态里还写着"已加载 N 个插件"（项目最忌的静默失败）。
+   * 入口那份只当模板与展示用，它自己的副作用在**进程退出**时统一释放。
+   */
+  async function freshPlugins() {
+    if (!plugins?.count) return null
+    const next = createPluginRegistry({
+      flickerVersion: plugins.flickerVersion,
+      planes: plugins.planes,
+      log: (line) => log(line),
+    })
+    await next.load(plugins.list.map((p) => p.file))
+    return next
+  }
+
   // ── 目录浏览（"选择文件/文件夹"背后的实现）──────────────────
   /**
    * 列出 `p` 目录下的内容。`p` 为空时列出**盘符**（Windows）或根（其它平台）。
@@ -309,6 +330,8 @@ export async function runGui(opts = {}) {
 
   // ── 本地界面服务（只监听回环）────────────────────────────
   const stationPromise = readAsset(ASSET.STATION_HTML)
+  // 稍后被 Host 校验用到：界面只接受 127.0.0.1/localhost:<这个端口>（见 localRequestProblem）
+  let boundPort = 0
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
     const json = (obj, code = 200) => {
@@ -317,6 +340,17 @@ export async function runGui(opts = {}) {
       res.end(b)
     }
     try {
+      // ── P1-4：只接受「本机页面自己」发来的请求 ─────────────
+      // 只监听回环挡不住 CSRF（任意网页都能 fetch 127.0.0.1）与 DNS rebinding
+      // （攻击者的域名解析到 127.0.0.1，浏览器就把它当成同源，能读 /api/browse 的
+      // 文件列表）。所以每个请求都要过 Host/Origin 这一关；写接口另查 Content-Type。
+      const bad = localRequestProblem(req, boundPort)
+      if (bad) {
+        log(`  ! 拒绝了可疑的界面请求：${bad}`)
+        if (url.pathname.startsWith('/api/')) json({ error: bad }, 403)
+        else { res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('forbidden') }
+        return
+      }
       if (url.pathname === '/' || url.pathname === '/index.html') {
         const html = await stationPromise
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -360,7 +394,20 @@ export async function runGui(opts = {}) {
       }
 
       if (req.method === 'POST') {
-        const body = await readBody(req)
+        // P1-4：写接口只收 application/json。跨站的「简单请求」（text/plain 等）
+        // 浏览器不发预检；这里不查的话，任意网页都能 POST 上来改状态。
+        const ct = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+        if (ct !== 'application/json') {
+          json({ error: '请求体必须是 application/json（拒绝跨站的简单请求）' }, 415)
+          return
+        }
+        let body
+        try {
+          body = await readJsonBody(req)
+        } catch (err) {
+          json({ error: err?.message ?? String(err) }, err?.code === 'TOO_LARGE' ? 413 : 400)
+          return
+        }
         switch (url.pathname) {
           case '/api/add': {
             const paths = (body.paths ?? []).filter((p) => typeof p === 'string' && p.trim());
@@ -430,6 +477,7 @@ export async function runGui(opts = {}) {
     // 只绑定回环：局域网内其他设备无法访问发送端的界面
     server.listen(0, '127.0.0.1', () => resolve(server.address().port))
   })
+  boundPort = port
   const guiUrl = `http://127.0.0.1:${port}/`
 
   // ── 就绪探测（约束 3b）──────────────────────────────────
@@ -468,23 +516,60 @@ export async function runGui(opts = {}) {
     await new Promise((r) => { server.close(() => r()); setTimeout(r, 500).unref?.() })
     return true
   })
-  const signals = bindSignals(destroyer, async () => { await destroyNow('程序退出') })
-  await new Promise((resolve) => {
-    server.on('close', resolve)
-    process.on('SIGINT', resolve)
-  })
-  await destroyNow('程序退出')
-  await destroyer.run()
-  // 兜底：把本程序在系统上留下的证书痕迹全部清掉。
-  // 即使上面某一步没走完（窗口被强关、异常退出），这里也保证不留残迹。
-  //
-  // ⚠️ 从前这里是 `.catch(() => {})` —— 静默吞掉。
-  //    而"读不到证书库"恰恰是最需要让人知道的情况（上次那张 CA 可能还在）。
-  //    现在把失败写进日志（窗口关掉后终端还在，GUI 的日志也在状态里）。
-  await cleanAllLeftovers().catch((e) => log(`  ⚠️ 退出时的证书残留清理没做完：${e?.message ?? e}`))
-  await cleanTempDirs().catch((e) => log(`  ⚠️ 退出时的临时目录清理没做完：${e?.message ?? e}`))
-  signals.uninstall()
-  return 0
+  // 入口加载的插件模板（每场传输用的是它的克隆）：它自己的 apply 副作用在这里释放。
+  destroyer.step('插件资源已释放（进程退出）', () => (plugins ? plugins.asDestroyStep() : false))
+
+  /**
+   * 真正退出前的销毁链：会话/接收服务/证书 + 本程序留下的其他痕迹，全部 await。
+   * 这正是 P2-11 的落点：以前这些异步动作跟在 process.exit 后面，来不及跑完。
+   */
+  async function shutdown(reason) {
+    try { await destroyNow(reason) } catch { /* 尽力而为 */ }
+    try { await destroyer.run() } catch { /* Destroyer 本身永不抛错 */ }
+    // 兜底：把本程序在系统上留下的证书痕迹全部清掉。
+    // 即使上面某一步没走完（窗口被强关、异常退出），这里也保证不留残迹。
+    //
+    // ⚠️ 从前这里是 `.catch(() => {})` —— 静默吞掉。
+    //    而"读不到证书库"恰恰是最需要让人知道的情况（上次那张 CA 可能还在）。
+    //    现在把失败写进日志（窗口关掉后终端还在，GUI 的日志也在状态里）。
+    await cleanAllLeftovers().catch((e) => log(`  ⚠️ 退出时的证书残留清理没做完：${e?.message ?? e}`))
+    await cleanTempDirs().catch((e) => log(`  ⚠️ 退出时的临时目录清理没做完：${e?.message ?? e}`))
+  }
+
+  // ⚠️ 这里不能用 destroy.js 的 bindSignals（P2-11）：它跑完 destroyer 后只
+  //    `onExit?.()` **不 await** 就 `process.exit`，而图形界面的销毁链（停接收服务、
+  //    清证书、删临时目录）全是异步的 —— Ctrl+C 时它们可能一个都没跑完，会话 CA
+  //    就留在系统信任库里了。改成"信号只请求退出"，由主流程 await 完销毁再决定退出码。
+  let exitCode = 0
+  let exitRequested = false
+  let resolveExit = () => {}
+  const exitPromise = new Promise((r) => { resolveExit = r })
+  const onSignal = (sig) => {
+    if (exitRequested) {
+      process.stderr.write('\n  再次收到中断，立即退出（销毁可能未完成）\n')
+      process.exit(130)
+    }
+    exitRequested = true
+    exitCode = sig === 'SIGTERM' ? EXIT.TERMINATED : EXIT.INTERRUPTED
+    process.stderr.write(`\n  收到 ${sig}，正在销毁…（再按一次可强制退出）\n`)
+    resolveExit()
+  }
+  const signalHandlers = [
+    ['SIGINT', () => onSignal('SIGINT')],
+    ['SIGTERM', () => onSignal('SIGTERM')],
+    ...(process.platform === 'win32' ? [] : [['SIGHUP', () => onSignal('SIGHUP')]]),
+  ]
+  for (const [sig, fn] of signalHandlers) process.on(sig, fn)
+  server.on('close', () => resolveExit())
+
+  await exitPromise
+  // 销毁链跑完再退出；60 秒兜底（证书清理要调系统命令，偶尔会卡住）。
+  await Promise.race([
+    shutdown('程序退出'),
+    new Promise((r) => { setTimeout(r, 60_000).unref?.() }),
+  ])
+  for (const [sig, fn] of signalHandlers) process.off(sig, fn)
+  return exitCode
 
   // ── 内部实现 ────────────────────────────────────────────
 
@@ -572,6 +657,10 @@ export async function runGui(opts = {}) {
   async function startTransfer(password) {
     if (!S.files.length) throw new Error('还没有选择文件')
     if (!password) throw new Error('密码不能为空')
+    // P2-3：接口没有防重入时，500ms 内双击「开始传输」会起**两个**会话、两张证书，
+    // 而「立即销毁」只作用于后一个 —— 前一个只能等自己的 --timeout 到点。
+    // 第二次明确拒绝（错误会在页面上显示，不是静默丢弃）。
+    if (S.run) throw new Error('已经在传输了（要重新开始，请先「立即销毁」当前会话）')
     S.password = password
     S.error = null; S.report = null; S.progress = null; S.phase = 'waiting'
     log('')
@@ -584,6 +673,17 @@ export async function runGui(opts = {}) {
     //    一把大文件的传输就是几分钟）。页面靠轮询 /api/state 才看起来正常，
     //    所以这个毛病一直没被发现。
     //    正确做法：把 runSend 的 promise 挂到 S.run 上，收尾逻辑放进 .then()。
+    // P2-1：每场传输用一份**新的**注册表（理由见 freshPlugins 的说明）。
+    // 变量名故意仍叫 plugins：下面那行仍是 `plugins,`，接线与测试都保持原样。
+    let plugins
+    try {
+      plugins = await freshPlugins()
+    } catch (e) {
+      // 用户显式要求了插件，就不能安静地"没有插件跑完"—— 明确失败并说清原因。
+      S.phase = 'error'
+      S.error = { title: '插件加载失败', message: e?.message ?? String(e) }
+      throw e
+    }
     S.run = runSend({
       inputs: S.paths,
       password,
@@ -594,10 +694,13 @@ export async function runGui(opts = {}) {
       limiter: S.rate ? new RateLimiter(S.rate.bytesPerSec) : null,
       installCert: flags['no-cert-install'] !== true,
       noQr: true, noColor: true,
-      timeoutMs: flags.timeout ? Number(flags.timeout) : 10 * 60 * 1000,
+      // P1-3：--timeout 在入口已解析成毫秒（从前 GUI 里 Number('30m') = NaN）。
+      timeoutMs: opts.timeoutMs ?? 10 * 60 * 1000,
       onReady: (info) => {
         S.url = info.urls.primary
-        S.phase = info.session.phase === 'ready' ? 'transfer' : 'waiting'
+        // P3-13：onReady 触发时 session.phase 还是 WAITING（ready 要等 authed），
+        // 所以这里**不能**用它判断"已认证"—— 阶段一律先置 waiting，交给事件驱动。
+        S.phase = 'waiting'
         // ⚠️ 必须留住这个句柄：界面上那个「立即销毁」按钮就是靠它工作的。
         //    从前这里只存了 `S.url`，句柄丢掉之后按钮只能改一下阶段文字，
         //    真正的会话（服务、密钥、证书）一个都没动 —— 用户看到的现象是
@@ -606,6 +709,14 @@ export async function runGui(opts = {}) {
         //    它会立刻收尾并走完整的销毁链。
         S.live = { session: info.session }
         log(`  ✓ 接收端链接：${S.url}`)
+        // P1-2：用户可能在**扫描/哈希阶段**就点了「立即销毁」—— 那时 S.live 还没就绪，
+        // 请求只能先记下来（见 destroyNow）。现在服务刚起来，立刻兑现它：
+        // 不这么做，按钮在最长几分钟的扫描期里等于没反应，而且传输完成后还会误报
+        // "已按你的要求销毁"（数据其实已经发出去了）。
+        if (S.destroyRequested) {
+          log('  · 准备阶段收到的销毁请求：服务刚就绪，立即销毁')
+          info.session.destroy()
+        }
       },
       onEvent: (evt) => {
         if (evt.type === 'peer-connected') log(`  ✓ 对方已连接 ${evt.peer?.address ?? ''}`)
@@ -628,7 +739,10 @@ export async function runGui(opts = {}) {
     S.run.then((result) => {
       S.live = null
       const report = result.report ?? { done: [], skipped: [], failed: [] }
-      if (S.destroyRequested) {
+      // P1-2：只有**真的被销毁**了才说"已按你的要求销毁"。从前只看 destroyRequested
+      // 这个标志 —— 扫描阶段点了按钮（那次请求其实被忽略）也会在传输**完成**之后
+      // 显示"已销毁"，而数据已经发出去了。result.reason 是销毁链/等待循环给出的真相。
+      if (S.destroyRequested && result.reason === 'destroyed') {
         // 用户自己点的「立即销毁」：这不是错误，别报"传输未完成"吓人。
         // 把销毁清单原样给他，让他看到"确实销毁了"。
         S.phase = 'destroyed'
@@ -693,7 +807,12 @@ export async function runGui(opts = {}) {
       if (live && !live.destroyed) {
         log(`  · 用户要求销毁（${reason}）`)
         live.destroy()          // runSend 200ms 内发现 → 走销毁链 → 回传清单
-      } else if (!S.run && S.phase !== 'idle' && S.phase !== 'plan') {
+      } else if (S.run) {
+        // P1-2：扫描/哈希阶段，会话还没建出来（onReady 没到）→ 只能先把请求记下来，
+        // 由 onReady 在服务就绪那一刻立刻 destroy()。**不能**在这里改阶段：
+        // 此刻什么都没销毁，改阶段就是骗人。
+        log('  · 已收到销毁请求：准备阶段结束后会立刻销毁（不用再点）')
+      } else if (S.phase !== 'idle' && S.phase !== 'plan') {
         // 没有在跑的会话（比如启动阶段就失败），但要给界面一个明确交代
         S.phase = 'destroyed'
       }
@@ -725,6 +844,11 @@ export async function runGui(opts = {}) {
     // 界面的注册表建的是 `planes: ['sender', 'receive']` —— 同一个插件可以两个方向都管，
     // 起接收服务时只把 `recv/*` 那批事件发出去（`upload-server.js` 里的 emitP）。
     if (S.recvLive) throw new Error('接收服务已经在运行了（先停止，或者等它结束）')
+    // P3-12：上一轮"停止"留下的标志必须清掉 —— 否则这一轮成功收完也会被标成"已停止"。
+    S.recvStopped = false
+    // P2-2：启动窗口期（生成证书要一两秒）里点「停止接收」时服务还没拿到句柄，
+    // 只能先记下"要停"；服务一出来立刻关掉（见下面 startReceiveService 之后）。
+    S.recvAbort = false
     const dir = String(dirInput ?? '').trim() || defaultSaveDir()
     S.recv = {
       phase: 'starting', dir, url: null, password: null, port: null,
@@ -734,6 +858,9 @@ export async function runGui(opts = {}) {
     const t0 = Date.now()
     let service
     try {
+      // P2-1：与发送一样，每场接收用一份**新的**注册表（用完由接收服务的销毁链释放）。
+      // 放在 try 里：加载失败也要走下面的"接收服务没能启动"，而不是卡在 starting。
+      const recvPlugins = await freshPlugins()
       service = await startReceiveService({
         dir,
         trust: flags.trust === true,
@@ -744,13 +871,24 @@ export async function runGui(opts = {}) {
         onDestroyLog: (m) => log(m),
         // 接收平面的插件（`recv/*`）。发射点是 `upload-server.js` 与 `recv.js`，
         // 出错**不打断接收**（错误会在结束时打进界面日志）。
-        plugins: plugins?.count ? plugins : null,
+        plugins: recvPlugins,
       })
     } catch (e) {
       S.recv.phase = 'error'
       S.recv.error = { title: '接收服务没能启动', message: e?.message ?? String(e) }
       log(`  ✗ 接收模式启动失败：${e?.message ?? e}`)
       throw e
+    }
+    // P2-2：启动过程中用户已经点了「停止接收」—— 服务现在才真的起来，
+    // 立刻销毁它并保持"已停止"（否则界面先显示已停止、一两秒后又"复活"成等待中，
+    // 链接/密码/证书其实都还在）。
+    if (S.recvAbort) {
+      const report = await service.stop().catch(() => null)
+      S.recvLive = null
+      S.recv.phase = 'stopped'
+      S.recv.report = report
+      log('  · 启动过程中已收到停止请求：接收服务已立即销毁')
+      return { ok: true, stopped: true }
     }
     S.recvLive = service
     S.recv.phase = 'waiting'
@@ -762,7 +900,9 @@ export async function runGui(opts = {}) {
 
     // 后台等结束（对方发完 / 超时 / 用户点停止）——**不能 await**，
     // 否则 /api/recv/start 这个请求会一直挂到传输结束（发送那边踩过同一个坑）。
-    const timeoutMs = 30 * 60 * 1000        // 接收模式给宽一点：用户要先找手机、扫码、选照片
+    // P1-3：命令行给了 --timeout 就必须听它的（从前这里写死 30 分钟，flag 被静默忽略）；
+    // 没给时接收模式仍给宽一点的时间：用户要先找手机、扫码、选照片。
+    const timeoutMs = opts.timeoutMs ?? 30 * 60 * 1000
     S.recvRun = (async () => {
       const result = await waitForReceive(service.receive, timeoutMs)
       const report = await service.stop()
@@ -880,6 +1020,7 @@ export async function runGui(opts = {}) {
   /** 用户点「停止接收」：真的销毁（会话、服务、证书），不是只改个状态 */
   async function stopRecv(reason) {
     S.recvStopped = true
+    S.recvAbort = true            // 启动窗口期里的停止请求也要兑现（P2-2）
     if (S.recvCollisionAnswer) S.recvCollisionAnswer('rename')     // 别让挂着的提问拖住销毁
     const live = S.recvLive
     if (!live) {
@@ -1134,11 +1275,55 @@ export async function runGui(opts = {}) {
 
 // ── 小工具 ──────────────────────────────────────────────────
 
-async function readBody(req) {
+/** 界面接口的请求体上限：这些接口只传路径/选项/密码，1 MiB 已经非常宽松（P3-8） */
+const MAX_BODY_BYTES = 1024 * 1024
+
+async function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   const chunks = []
-  for await (const c of req) chunks.push(c)
+  let total = 0
+  for await (const c of req) {
+    total += c.length
+    if (total > maxBytes) {
+      const err = new Error(`请求体超过 ${maxBytes} 字节上限`)
+      err.code = 'TOO_LARGE'
+      throw err
+    }
+    chunks.push(c)
+  }
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return {} }
+}
+
+/**
+ * 判断一个界面请求是不是「本机页面自己」发来的（P1-4）。
+ *
+ * 只监听 127.0.0.1 **不能**防住这两类攻击：
+ *   · CSRF：用户打开任意恶意网页，那个网页可以 fetch http://127.0.0.1:<port>/api/add
+ *     （浏览器不拦 —— 请求确实发到了本机）；
+ *   · DNS rebinding：攻击者域名先解析到自己的 IP、再切到 127.0.0.1，浏览器就把它
+ *     当成同源，于是能读 /api/browse 的文件列表。
+ * 所以：Host 必须精确等于本机回环:<这个端口>；带了 Origin 就必须同源。
+ * （同源 GET 不带 Origin、POST 会带 —— 两种都要放行，否则会误伤自己的页面。）
+ *
+ * @returns {string|null} 问题描述；null = 放行
+ */
+function localRequestProblem(req, port) {
+  const host = req.headers.host
+  let hostUrl
+  try { hostUrl = new URL('http://' + String(host ?? '')) } catch {
+    return `Host 不合法（${JSON.stringify(host)}）`
+  }
+  const name = hostUrl.hostname.toLowerCase()
+  const gotPort = hostUrl.port ? Number(hostUrl.port) : 80
+  if ((name !== '127.0.0.1' && name !== 'localhost') || gotPort !== port) {
+    return `Host 不是本机回环地址（${JSON.stringify(host)}）—— 可能是 DNS rebinding`
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined) {
+    const ok = origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`
+    if (!ok) return `拒绝跨站请求（Origin: ${origin}）`
+  }
+  return null
 }
 
 /** 就绪探测：确认本地界面服务真的能返回响应 */
@@ -1157,12 +1342,41 @@ async function probe(url, timeoutMs = 4000) {
   return { ok: false, attempts, detail: lastErr }
 }
 
-/** 用系统默认方式打开 URL */
-function openDefault(url) {
-  const cmd = process.platform === 'win32' ? 'cmd'
-    : process.platform === 'darwin' ? 'open' : 'xdg-open'
-  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
+/**
+ * 用系统默认方式打开一个 URL（不阻塞）。**导出给 bin/flicker.js 与测试共用**。
+ *
+ * ⚠️ 这里**绝不能**走 cmd /c start（P0-1 的根因）：Windows 的 spawn 不会给
+ *    不含空格的参数加引号，cmd.exe 会把 URL 里的 & 当命令分隔符 ——
+ *    对方给的链接 https://relay/room/…?x=1&calc 就等于任意命令执行。
+ *    所以 Windows 改用 rundll32 url.dll,FileProtocolHandler（数组传参、不经 shell）。
+ * 另外只允许 http/https：file: / javascript: 没有任何理由由界面的「打开」按钮执行。
+ *
+ * @param {string} url
+ * @returns {{cmd:string,args:string[]}}
+ * @throws {Error} 不是 http/https 链接
+ */
+export function openUrlCommand(url) {
+  let parsed
+  try { parsed = new URL(String(url)) } catch { throw new Error(`不是一个合法的链接：${url}`) }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`只允许打开 http/https 链接（收到 ${parsed.protocol}）`)
+  }
+  const win = process.platform === 'win32'
+  const cmd = win ? 'rundll32' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  const args = win ? ['url.dll,FileProtocolHandler', String(url)] : [String(url)]
+  return { cmd, args }
+}
+
+/** 打开 URL；打开失败就算了（屏幕上已经给过链接），但**链接非法时要能说出原因**。 */
+export function openUrl(url) {
+  const { cmd, args } = openUrlCommand(url)
   try { spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref() } catch { /* 打不开就算了 */ }
+  return { cmd, args }
+}
+
+/** 用系统默认方式打开 URL（界面自用的薄包装） */
+function openDefault(url) {
+  try { openUrl(url) } catch { /* 打开失败就算了：屏幕上已经打印了链接 */ }
 }
 
 /**

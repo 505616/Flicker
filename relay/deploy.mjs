@@ -25,6 +25,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const args = process.argv.slice(2)
 const checkOnly = args.includes('--check')
+/** 两个页面模块的生成脚本（接收页 = 中继首页，发送页 = /send） */
+const PAGE_GEN = path.join(ROOT, 'gen', 'gen-relay-page.mjs')
+const SENDER_GEN = path.join(ROOT, 'gen', 'gen-relay-sender.mjs')
 
 const ok = (m) => console.log(`  ✓ ${m}`)
 const bad = (m) => console.log(`  ✗ ${m}`)
@@ -52,6 +55,47 @@ function runNode(argv, opts = {}) {
 }
 
 console.log('\n  闪传 Flicker —— 部署中继（一次即可）\n')
+
+// ── ⓘ --check：**真正只读**的环境检查 ─────────────────────
+//
+// ⚠️ 从前 --check 会：① 无条件跑 gen-relay-page.mjs（该脚本会 writeFileSync
+//    覆盖 relay/page.generated.js）；② 可能生成 wrangler.toml；③ 用 npx 联网
+//    下载 wrangler。于是"只检查"在只读检出 / CI / 审查环境里会写脏工作树、还会
+//    静默把过期产物"修好"—— 检查结果因而不可信。
+//    现在 --check 只做**读操作**：两个生成脚本的 --check、配置文件存在性、
+//    本地是否已有 wrangler 的提示。不写文件、不联网。
+if (checkOnly) {
+  let allOk = true
+  for (const [label, script] of [['接收页', PAGE_GEN], ['发送页', SENDER_GEN]]) {
+    const r = runNode([script, '--check'])
+    if (r.code === 0) ok(`${label}产物与源文件一致`)
+    else {
+      allOk = false
+      bad(`${label}产物与源文件不一致（--check 不写文件，请手动运行对应生成脚本）`)
+      info(r.out.split('\n').filter(Boolean).slice(-2).join('\n    '))
+    }
+  }
+
+  const cfgPath = path.join(HERE, 'wrangler.toml')
+  if (existsSync(cfgPath)) {
+    const name = (readFileSync(cfgPath, 'utf8').match(/name\s*=\s*"([^"]+)"/) ?? [])[1]
+    ok(`部署配置存在（name = ${name ?? '未知'}）`)
+  } else {
+    info('还没有 relay/wrangler.toml —— 正式部署时会自动生成')
+  }
+
+  // 只判断"本地是否已经装过"，**不联网**。没装不代表有问题：部署时会经 npx 获取。
+  const localWrangler = path.join(HERE, 'node_modules', 'wrangler')
+  info(existsSync(localWrangler)
+    ? '本地已安装 wrangler'
+    : '本地未预装 wrangler（正式部署时会经 npx 获取；--check 刻意不联网）')
+
+  console.log(allOk
+    ? '\n  （--check）环境检查通过，未写任何文件、未联网。\n'
+    : '\n  （--check）产物不同步（本次检查未写任何文件、未联网），' +
+      '请先运行：node gen/gen-relay-page.mjs && node gen/gen-relay-sender.mjs\n')
+  process.exit(allOk ? 0 : 1)
+}
 
 // ── ⓪ 密钥文件（可选）：绕开浏览器登录 ─────────────────────
 //
@@ -82,15 +126,33 @@ if (!process.env.CLOUDFLARE_API_TOKEN && existsSync(tokenFile)) {
   }
 }
 
-// ── ① 生成页面模块（Worker 要把它发给接收端）──────────────
-console.log('① 准备接收端页面…')
-const gen = runNode([path.join(ROOT, 'gen', 'gen-relay-page.mjs')])
-if (gen.code !== 0) {
-  bad('页面模块生成失败')
-  info(gen.out.slice(0, 400))
-  process.exit(1)
+// ── ① 生成页面模块（Worker 要把它们发给浏览器）──────────────
+//
+// ⚠️ 必须**两个都生成**：接收页（首页）与发送页（/send）。
+//    从前只生成接收页，于是改了 web/sender.html 却忘了重跑
+//    gen-relay-sender.mjs 时，部署出去的 /send 会悄悄是旧版 ——
+//    症状是"本地对、线上行为不同"。这里先 --check、不一致就重新生成、
+//    生成后再 --check 一次，任何一步失败都明确报出来。
+console.log('① 准备中继页面模块…')
+for (const [label, script] of [['接收页', PAGE_GEN], ['发送页', SENDER_GEN]]) {
+  const pre = runNode([script, '--check'])
+  if (pre.code !== 0) {
+    info(`${label}产物落后于源文件，正在重新生成…`)
+    const gen = runNode([script])
+    if (gen.code !== 0) {
+      bad(`${label}页面模块生成失败`)
+      info(gen.out.slice(0, 400))
+      process.exit(1)
+    }
+  }
+  const post = runNode([script, '--check'])
+  if (post.code !== 0) {
+    bad(`${label}产物生成后校验仍不通过`)
+    info(post.out.slice(0, 400))
+    process.exit(1)
+  }
+  ok(`${label}页面模块已是最新`)
 }
-info(gen.out.split('\n').pop()?.trim() ?? '')
 
 // ── ② 生成 wrangler 配置 ───────────────────────────────────
 console.log('\n② 生成部署配置…')
@@ -111,6 +173,8 @@ compatibility_date = "2025-01-01"
 } else {
   const name = (readFileSync(cfgPath, 'utf8').match(/name\s*=\s*"([^"]+)"/) ?? [])[1]
   ok(`沿用已有的 relay/wrangler.toml（name = ${name ?? '未知'}）`)
+  info('部署会写到这个 Worker 名下；若你的账号里已有同名 Worker，会被覆盖。')
+  info('想换个名字就编辑 relay/wrangler.toml 里的 name（例如加个随机后缀）。')
 }
 
 // ── ③ 检查 wrangler ────────────────────────────────────────
@@ -144,12 +208,22 @@ if (process.env.CLOUDFLARE_API_TOKEN) {
 const who = runNpx(['--yes', 'wrangler@latest', 'whoami'], { cwd: HERE })
 if (who.code !== 0 || /not authenticated|You are not authenticated/i.test(who.out)) {
   console.log('   需要先登录，正在打开授权页面…')
-  const login = runNpx(['--yes', 'wrangler@latest', 'login'], { cwd: HERE, stdio: 'inherit' })
+  // ⚠️ 必须**捕获**输出。从前这里用 `stdio: 'inherit'`，spawnSync 的
+  //    stdout/stderr 都是 null，runNpx 拼出来的 out 恒为空字符串 ——
+  //    于是下面"登录失败 → 解释被墙"的整段诊断成了**死代码**，
+  //    用户永远看不到那段专门为国内网络写的排查指引。
+  //    现在把输出 pipe 出来、再原样打印给用户（wrangler login 本身不交互，
+  //    它只是打开浏览器等授权，所以"先存后打"不会破坏流程）。
+  const login = runNpx(['--yes', 'wrangler@latest', 'login'],
+    { cwd: HERE, stdio: ['inherit', 'pipe', 'pipe'] })
+  if (login.out) {
+    console.log(login.out.split('\n').map((l) => '    ' + l).join('\n'))
+  }
   if (login.code !== 0) {
     bad('登录未完成')
     // ⚠️ 这条失败在国内网络上极常见，而报错本身完全指不到原因（它只说"连不上认证服务器"）。
     //    所以这里把**能照着做**的下一步直接写出来 —— 这正是本项目的做法。
-    if (/Could not reach the Cloudflare auth server|UND_ERR_CONNECT_TIMEOUT/i.test(login.out)) {
+    if (/Could not reach the Cloudflare auth server|UND_ERR_CONNECT_TIMEOUT/i.test(login.out ?? '')) {
       console.log('\n   原因：你的网络连不上 Cloudflare 的**控制台域名** dash.cloudflare.com')
       console.log('   （它的接口 api.cloudflare.com 是通的，挡住的只是控制台）。')
       console.log('   wrangler 的浏览器登录必须走控制台，所以这条路在你这里走不通。\n')

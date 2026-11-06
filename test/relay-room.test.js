@@ -10,6 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   RoomStore, RelayError, MAX_MESSAGE_BYTES, DEFAULT_MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_ROOM,
+  DEFAULT_MAX_BYTES_PER_ROOM, DEFAULT_MAX_STORE_BYTES,
 } from '../src/relay/room.js'
 
 const ROOM = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -321,6 +322,113 @@ test('大量消息下序号与内容都不漂移', () => {
 })
 
 // ── 中继看不到什么 ──────────────────────────────────────────
+
+
+
+// ── 字节配额（P0-2）：条数上限挡不住内存，字节才是护栏 ───────────
+
+test('单房间字节上限：超限 413，ack 之后额度立刻释放', () => {
+  const { store } = makeStore({ maxBytesPerRoom: 100, maxStoreBytes: 1000 })
+  store.create(ROOM)
+
+  store.put(ROOM, 0, bytes(60))
+  assert.equal(store.stats().bytes, 60, '写入后应当记到房间与全店账上')
+  assert.equal(store.stats().totalBytes, 60)
+
+  // 60 + 41 = 101 > 100 —— 必须拒绝，且不能只写进去一半
+  assert.throws(() => store.put(ROOM, 1, bytes(41)),
+    (e) => e.code === 'ROOM_QUOTA' && e.status === 413,
+    '单房间超限必须是 413（房间满了重试无用，与 507「稍后再试」要能区分）')
+  assert.equal(store.status(ROOM).pending, 1, '被拒的消息一条都不许落库')
+  assert.equal(store.stats().totalBytes, 60)
+
+  // 接收端确认后，内存真的释放了 —— 配额也必须跟着回来
+  store.ack(ROOM, 0)
+  assert.equal(store.stats().totalBytes, 0, 'ack 必须同步扣减全店字节数')
+  assert.doesNotThrow(() => store.put(ROOM, 1, bytes(100)), 'ack 释放后应当能继续写')
+  assert.equal(store.status(ROOM).nextSeq, 2)
+})
+
+test('putBatch 按**整批总和**校验：逐条不超、加起来超了也要 413', () => {
+  const { store } = makeStore({ maxBytesPerRoom: 100, maxStoreBytes: 1000 })
+  store.create(ROOM)
+  // 两条各 60 字节：逐条校验都能过，但总和 120 > 100
+  assert.throws(() => store.putBatch(ROOM, [bytes(60), bytes(60)]),
+    (e) => e.code === 'ROOM_QUOTA' && e.status === 413)
+  assert.equal(store.status(ROOM).pending, 0, '整批拒绝时必须一条都不落库（先校验后写入）')
+  assert.equal(store.stats().totalBytes, 0)
+  // 正好装满的一批应当允许（边界）
+  assert.doesNotThrow(() => store.putBatch(ROOM, [bytes(50), bytes(50)]))
+  assert.equal(store.stats().bytes, 100)
+})
+
+test('全店字节上限：超限 507（与单房间的 413 区分开）', () => {
+  const ROOM2 = 'b'.repeat(64)
+  const { store } = makeStore({ maxBytesPerRoom: 1000, maxStoreBytes: 150 })
+  store.create(ROOM)
+  store.create(ROOM2)
+
+  store.put(ROOM, 0, bytes(80))
+  assert.throws(() => store.put(ROOM2, 0, bytes(80)),
+    (e) => e.code === 'STORE_FULL' && e.status === 507,
+    '全店满了是服务端容量问题（507），不是请求本身太大（413）')
+  assert.equal(store.status(ROOM2).pending, 0, '被拒的消息不许落库')
+
+  // 销毁一个房间就能把整店的额度还回来
+  store.destroy(ROOM)
+  assert.equal(store.stats().totalBytes, 0)
+  assert.doesNotThrow(() => store.put(ROOM2, 0, bytes(80)))
+})
+
+test('房间过期 / sweep 会释放字节额度（否则配额只增不减）', () => {
+  const { store, tick } = makeStore({ ttlMs: 1000, maxBytesPerRoom: 200, maxStoreBytes: 200 })
+  store.create(ROOM)
+  store.put(ROOM, 0, bytes(120))
+  assert.equal(store.stats().totalBytes, 120)
+
+  tick(1500)
+  assert.equal(store.sweep(), 1)
+  assert.equal(store.stats().totalBytes, 0, '过期清理必须扣掉全店字节数')
+  assert.equal(store.stats().bytes, 0)
+
+  // 额度真的回来了：再建一个房间、写满上限
+  store.create(ROOM)
+  assert.doesNotThrow(() => store.put(ROOM, 0, bytes(200)))
+})
+
+test('默认配额足以容纳正常传输（窗口 8 × 2 MiB），但远小于"条数 × 单条上限"', () => {
+  // 正常在途量：8 × 2 MiB = 16 MiB。默认单房间上限必须包得住，否则会误伤真实传输。
+  assert.ok(DEFAULT_MAX_BYTES_PER_ROOM >= 16 << 20,
+    '单房间默认配额至少要容得下"窗口 8 × 2 MiB"的正常在途量')
+  assert.ok(DEFAULT_MAX_STORE_BYTES >= DEFAULT_MAX_BYTES_PER_ROOM,
+    '全店上限不该小于单房间上限')
+  // 但必须远小于旧的"4096 条 × 2 MiB ≈ 7.8 GiB"的理论值（Worker isolate 只有约 128 MB）
+  assert.ok(DEFAULT_MAX_BYTES_PER_ROOM <= 64 << 20)
+  assert.ok(DEFAULT_MAX_STORE_BYTES <= 96 << 20)
+
+  // 真实写一遍：默认 store 能收下 8 条满消息（= 一个正常窗口）
+  const { store } = makeStore()
+  store.create(ROOM)
+  for (let i = 0; i < 8; i++) store.put(ROOM, i, bytes(DEFAULT_MAX_MESSAGE_BYTES, i + 1))
+  assert.equal(store.stats().totalBytes, 8 * DEFAULT_MAX_MESSAGE_BYTES)
+  // 全部确认后应当回到 0
+  store.ack(ROOM, 7)
+  assert.equal(store.stats().totalBytes, 0)
+  assert.equal(store.status(ROOM).pending, 0)
+})
+
+test('stats() 暴露字节数（运维才能看出"谁在占内存"）', () => {
+  const { store } = makeStore()
+  store.create(ROOM)
+  store.put(ROOM, 0, bytes(10))
+  const s = store.stats()
+  assert.equal(s.rooms, 1)
+  assert.equal(s.messages, 1)
+  assert.equal(s.bytes, 10)
+  assert.equal(s.totalBytes, 10)
+  assert.equal(s.maxBytesPerRoom, store.maxBytesPerRoom)
+  assert.equal(s.maxStoreBytes, store.maxStoreBytes)
+})
 
 test('房间逻辑不解释消息内容 —— 它只搬运字节', () => {
   const { store } = makeStore()

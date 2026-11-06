@@ -134,15 +134,43 @@ async function startFakeRelay(opts = {}) {
 async function receiveAll({ base, roomName, password, outDir }) {
   const url = (s = '') => `${base}/r/${roomName}${s}`
 
-  // 取清单
-  let manifestMsg = null
-  for (let i = 0; i < 100 && !manifestMsg; i++) {
+  // 取清单（P1-2 新线格式：seq 0..partCount-1 是清单分片，拼回 M）
+  //   第 i 条 = BE32(i) || BE32(partCount) || M.slice(...)
+  //   ⚠️ 这里按规范独立实现一遍，不复用发送端的分帧函数 ——
+  //      否则"两边不一致"会被同一份错误实现同时满足。
+  const parts = []
+  let partCount = 0
+  for (let attempt = 0; attempt < 100 && !partCount; attempt++) {
     const r = await fetch(url('?seq=0'))
-    if (r.status === 200) { manifestMsg = new Uint8Array(await r.arrayBuffer()); break }
+    if (r.status === 200) {
+      const first = new Uint8Array(await r.arrayBuffer())
+      assert.ok(first.length >= 8, '清单分片至少要有 8 字节头')
+      const dv = new DataView(first.buffer, first.byteOffset, first.byteLength)
+      assert.equal(dv.getUint32(0), 0, 'seq=0 的分片头必须是 BE32(0)')
+      partCount = dv.getUint32(4)
+      assert.ok(partCount >= 1, 'partCount 至少 1')
+      parts.push(first.subarray(8))
+      break
+    }
     if (r.status !== 404) throw new Error(`取清单失败: HTTP ${r.status}`)
     await new Promise((x) => setTimeout(x, 50))
   }
-  assert.ok(manifestMsg, '应能从中继取到清单')
+  assert.ok(partCount > 0, '应能从中继取到清单')
+  for (let i = 1; i < partCount; i++) {
+    let body = null
+    for (let attempt = 0; attempt < 100 && !body; attempt++) {
+      const r = await fetch(url(`?seq=${i}`))
+      if (r.status === 200) { body = new Uint8Array(await r.arrayBuffer()); break }
+      if (r.status !== 404) throw new Error(`取清单分片 ${i} 失败: HTTP ${r.status}`)
+      await new Promise((x) => setTimeout(x, 50))
+    }
+    assert.ok(body, `应能取到清单分片 ${i}`)
+    const dv = new DataView(body.buffer, body.byteOffset, body.byteLength)
+    assert.equal(dv.getUint32(0), i, `第 ${i} 片的头必须是 BE32(${i})`)
+    assert.equal(dv.getUint32(4), partCount, '每片都要带同一个 partCount')
+    parts.push(body.subarray(8))
+  }
+  const manifestMsg = Buffer.concat(parts.map((p) => Buffer.from(p)))
 
   const { type, payload } = unpackMessage(manifestMsg)
   assert.equal(type, MSG.MANIFEST)
@@ -175,7 +203,8 @@ async function receiveAll({ base, roomName, password, outDir }) {
     await mkdir(path.dirname(full), { recursive: true })
     const parts = []
     for (let ci = 0; ci < f.chunks; ci++) {
-      const seq = 1 + f.firstChunk + ci
+      // 数据块全局序号 g 占 seq = partCount + g（旧协议写死 1）
+      const seq = partCount + f.firstChunk + ci
       let buf = null
       for (let i = 0; i < 400 && !buf; i++) {          // 发送端是按需投递的，要等
         const r = await fetch(url(`?seq=${seq}`))
@@ -189,7 +218,7 @@ async function receiveAll({ base, roomName, password, outDir }) {
       const ctag = Buffer.from(p.subarray(0, 16))
       const cct = Buffer.from(p.subarray(16))
       const plainLen = Math.min(f.chunkBytes, f.size - ci * f.chunkBytes)
-      const dd = createDecipheriv('aes-256-gcm', keys.enc, chunkIV(ci), { authTagLength: 16 })
+      const dd = createDecipheriv('aes-256-gcm', keys.enc, chunkIV(fi, ci), { authTagLength: 16 })
       dd.setAAD(chunkAAD(fi, ci, f.chunks, plainLen)); dd.setAuthTag(ctag)
       const pt = Buffer.concat([dd.update(cct), dd.final()])
       assert.equal(pt.length, plainLen, `分块 ${seq} 长度不符`)
@@ -341,6 +370,43 @@ test('⭐ 能力协商：中继声明 2 MiB → 用 2 MiB 的块跑通；老中�
     // 每一位块序号都要被确认（完成判据的硬要求）
     assert.ok(events.some((e) => e.type === 'relay-complete'), '应当收到完成事件')
   }
+})
+
+
+test('⭐ 清单分帧（P1-2）：中继单条上限很小时，清单被拆成多条仍能端到端送达', { timeout: 180000 }, async () => {
+  // 中继上限故意压到 4096：60 个单块文件的清单远超 4088（= 4096 - 8）字节，
+  // 必然被拆成多条。旧实现会在这里 413 TOO_LARGE，整次传输在开局失败。
+  const relay = await startFakeRelay({ maxMessageBytes: 4096 })
+  const out = await mkdtemp(path.join(tmpdir(), 'flicker-relay-parts-'))
+  cleanups.push(() => rm(out, { recursive: true, force: true }))
+
+  const files = {}
+  for (let i = 0; i < 60; i++) files['f' + i + '.txt'] = randomBytes(100)
+  const { manifest, wire } = await makeManifestWithChunk(files, 1024)
+
+  const { sender, roomName } = await bootSender({
+    relayBase: relay.base, password: 'manifest-parts-pass', manifest, wire,
+  })
+  assert.ok(sender.client.manifestParts >= 2,
+    `清单应被拆成多条消息（实际 ${sender.client.manifestParts} 条）——` +
+    '否则这条用例根本没走到分帧路径')
+
+  const runP = sender.run({ timeoutMs: 120000 })
+  const recvP = receiveAll({
+    base: relay.base, roomName, password: 'manifest-parts-pass', outDir: out,
+  })
+  const [run, recv] = await Promise.all([runP, recvP])
+
+  assert.equal(run.ok, true, `发送端应报告完成（${run.reason}）`)
+  assert.equal(recv.wire.files.length, 60, '拼回来的清单里应有 60 个文件')
+  assert.equal(recv.wire.totalChunks, wire.totalChunks, '清单里的总块数必须一致')
+  for (const w of recv.written) {
+    const a = await readFile(manifest.files.find((f) => f.rel === w.rel).absPath)
+    const b = await readFile(path.join(out, w.rel))
+    assert.equal(Buffer.compare(a, b), 0, `${w.rel} 内容不一致（清单分帧后仍须逐字节一致）`)
+  }
+  // 总消息数 = 清单分片数 + 数据块数（完成判据用的就是它）
+  assert.equal(sender.client.totalMessages, sender.client.manifestParts + wire.totalChunks)
 })
 
 test('⭐ 中继上流动的永远是密文（直接检查中继侧看到的字节）', { timeout: 180000 }, async () => {
@@ -501,7 +567,8 @@ test('⭐ 完成判据必须等接收端确认，而不是"我投完了就算完
   const { sender } = await bootSender({
     relayBase: relay.base, password: 'ack-gate-test', manifest, wire,
   })
-  const total = 1 + wire.files.reduce((s, f) => s + f.chunks, 0)
+  // 总消息数 = 清单分片数 + 数据块数（由发送端在 open() 后确定）
+  const total = sender.client.totalMessages
 
   const runP = sender.run({ timeoutMs: 60000 })
 

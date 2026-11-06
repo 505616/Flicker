@@ -34,6 +34,11 @@
 import { RoomStore, RelayError } from '../src/relay/room.js'
 import { handleRelay } from '../src/relay/protocol.js'
 import { RECEIVER_HTML } from './page.generated.js'
+// ⚠️ 忘了这行时，`/send` 会在 `senderHtml()` 里抛 ReferenceError（SENDER_HTML is not defined），
+//    fetch handler 直接 reject → Cloudflare 返回裸 500。而部署脚本只探 /health，
+//    所以"手机传手机"整条路在真实部署上是坏的、测试却是绿的。
+//    现在由 test/relay-worker.test.js 真正 import 本文件并请求 /send 来盯住它。
+import { SENDER_HTML } from './sender.generated.js'
 
 // ⚠️ 这里的 Store 存在**模块作用域**，也就是活在 Worker 的 isolate 里。
 //    Cloudflare 会在没有请求时回收 isolate —— 那一刻所有房间一起消失，
@@ -54,14 +59,34 @@ export default {
    * @param {object} ctx
    */
   async fetch(request, env, ctx) {
-    const url = new URL(request.url)
+    // ⚠️ 整个适配层必须有兜底。
+    //    Worker 的 fetch handler 一旦 reject，平台只会回一个没有任何信息的 500，
+    //    连"是哪个错误"都看不到 —— 对部署者（自己搭中继的人）等于断了一条排查线索。
+    //    这里把错误名/消息带回去，同时**不暴露堆栈**（可能含内部路径）。
+    try {
+      const url = new URL(request.url)
 
-    // 接收端页面由 page.generated.js 提供（构建产物，源自 web/receiver.html）。
-    // 页面是单文件、零外部请求的，所以中继只需要回这一段 HTML。
-    const pageHtml = async () => RECEIVER_HTML
-    // 网页发送端（手机传手机时两边都只有浏览器，只能由中继提供这一页）
-    const senderHtml = async () => SENDER_HTML
+      // 接收端页面由 page.generated.js 提供（构建产物，源自 web/receiver.html）。
+      // 页面是单文件、零外部请求的，所以中继只需要回这一段 HTML。
+      const pageHtml = async () => RECEIVER_HTML
+      // 网页发送端（手机传手机时两边都只有浏览器，只能由中继提供这一页）
+      const senderHtml = async () => SENDER_HTML
 
-    return handleRelay(request, url.pathname, store, { pageHtml, senderHtml })
+      return await handleRelay(request, url.pathname, store, { pageHtml, senderHtml })
+    } catch (e) {
+      const name = e?.name ?? 'Error'
+      const message = e?.message ?? String(e)
+      console.error(JSON.stringify({ event: 'relay-worker-error', name, message }))
+      return new Response(JSON.stringify({
+        error: 'INTERNAL',
+        message: `中继内部错误：${name}: ${message}`,
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      })
+    }
   },
 }

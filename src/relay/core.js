@@ -30,16 +30,22 @@
  * 其 cause 里可能是 ECONNRESET / ENOTFOUND / UND_ERR_* 等）。
  */
 export function isTransientError(e, status) {
-  // HTTP 层面：5xx 与 429 值得重试。
-  // ⚠️ 这一条**必须排在前面**：调用方可能直接用状态码问
-  //    （isTransientError(null, 503)），此时没有错误对象可查。
-  if (typeof status === 'number') return status >= 500 || status === 429
-  if (!e) return false
+  if (!e) {
+    // 调用方可能直接用状态码问（isTransientError(null, 503)），此时没有错误对象可查。
+    if (typeof status === 'number') return status >= 500 || status === 429
+    return false
+  }
   if (e.code === 'ABORTED' || e.name === 'RelayAborted') return false
-  // 协议层面：明确不可恢复的，不重试
+  // 协议层面：明确不可恢复的，不重试。
+  // ⚠️ 这段必须在"按状态码判断"**之前**：507 的 ROOM_FULL / STORE_FULL
+  //    也 >= 500，但"房间满了"重试一万次还是满 —— 与"只重试瞬时故障"矛盾。
   const fatal = ['NO_ROOM', 'EXPIRED', 'GONE', 'NOT_YET', 'BAD_SEQ', 'BAD_ROOM_ID',
-    'TOO_LARGE', 'BAD_BODY', 'EMPTY_BODY', 'EMPTY_BATCH', 'BATCH_TOO_LARGE', 'BAD_BATCH']
+    'TOO_LARGE', 'BAD_BODY', 'EMPTY_BODY', 'EMPTY_BATCH', 'BATCH_TOO_LARGE', 'BAD_BATCH',
+    'ROOM_FULL', 'ROOM_QUOTA', 'STORE_FULL', 'MANIFEST_TOO_LARGE']
   if (typeof e.code === 'string' && fatal.includes(e.code)) return false
+  // HTTP 层面：5xx 与 429 值得重试
+  if (typeof status === 'number') return status >= 500 || status === 429
+  if (typeof e.status === 'number') return e.status >= 500 || e.status === 429
   if (e.name === 'TimeoutError' || e.name === 'AbortError') return true
   if (e.name === 'TypeError') return true                 // fetch 的网络层失败
   const cause = e.cause?.code ?? e.cause?.name

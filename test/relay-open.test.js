@@ -73,9 +73,35 @@ function makeSession(password = 'open-test-password') {
   }
 }
 
-const clientFor = (base, s) => new RelayClient({
+const clientFor = (base, s, extra = {}) => new RelayClient({
   baseUrl: base, roomName: s.roomName, encKey: s.keys.enc, manifest: {},
+  sleep: () => Promise.resolve(),   // 测试里不等退避
+  ...extra,
 })
+
+/**
+ * 把中继上的清单分片拼回 M。
+ *
+ * ⚠️ 这里**自己实现**解析，不 import 发送端的 packManifestParts ——
+ *    被测实现自己解释自己写的格式，是抓不到"两边不一致"的。
+ */
+async function readManifest(base, room) {
+  const first = new Uint8Array(await (await fetch(`${base}/r/${room}?seq=0`)).arrayBuffer())
+  assert.ok(first.length >= 8, '清单分片至少要有 8 字节头')
+  const dv = new DataView(first.buffer, first.byteOffset, first.byteLength)
+  assert.equal(dv.getUint32(0), 0, 'seq=0 的分片头必须是 BE32(0)')
+  const partCount = dv.getUint32(4)
+  assert.ok(partCount >= 1, 'partCount 至少 1')
+  const bodies = [first.subarray(8)]
+  for (let i = 1; i < partCount; i++) {
+    const p = new Uint8Array(await (await fetch(`${base}/r/${room}?seq=${i}`)).arrayBuffer())
+    const pv = new DataView(p.buffer, p.byteOffset, p.byteLength)
+    assert.equal(pv.getUint32(0), i, `第 ${i} 片的头必须是 BE32(${i})`)
+    assert.equal(pv.getUint32(4), partCount, '每片都要带同一个 partCount')
+    bodies.push(p.subarray(8))
+  }
+  return Buffer.concat(bodies.map((b) => Buffer.from(b)))
+}
 
 const statusOf = async (base, room) => {
   const r = await fetch(`${base}/r/${room}/status`)
@@ -96,8 +122,8 @@ test('正常开局：房间由自己创建，清单落在 seq 0', async () => {
   assert.equal(st.nextSeq, 1, '清单必须已经投出去（nextSeq=1）')
   assert.equal(c.posted, 1, '本地计数也要与服务端对齐')
 
-  // seq 0 的内容必须**就是**我们那条清单，一个字节都不能差
-  const got = Buffer.from(await (await fetch(`${base}/r/${s.roomName}?seq=0`)).arrayBuffer())
+  // 清单按新线格式分帧：seq 0..partCount-1 拼回来必须**就是**我们那条 M，一个字节都不差
+  const got = await readManifest(base, s.roomName)
   assert.deepEqual(got, s.manifestMessage)
 })
 
@@ -123,7 +149,7 @@ test('⭐ 创建响应在回程丢了 → 仍然要把清单投出去（否则�
     '    两分钟后报"等不到了" —— 而用户已经把链接发出去了。\n' +
     '    触发条件很平常：初始 POST 的响应在回程丢了（网络抖动、代理超时）。')
 
-  const got = Buffer.from(await (await fetch(`${base}/r/${s.roomName}?seq=0`)).arrayBuffer())
+  const got = await readManifest(base, s.roomName)
   assert.deepEqual(got, s.manifestMessage, '补投的内容必须与清单一致')
 })
 
@@ -172,6 +198,51 @@ test('被抢占时报的是不可重试的错误（重试一万次房间也还�
 })
 
 // ── 4. 幂等：重复 open 不会污染房间 ─────────────────────────
+
+// ── 5. 清单 POST 的响应丢了：重试必须能自愈（P2-1）──────────────
+
+test('⭐ 清单 POST 已落库但响应丢了 → 重试读 status 发现已落库，自动成功（不是撞 409 失败）', async () => {
+  const store = new RoomStore()
+  let manifestPosts = 0
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    const body = Buffer.concat(chunks)
+    const isManifest = req.method === 'POST' && url.searchParams.get('seq') === '0' &&
+      /^\/r\/[^/]+$/.test(url.pathname)
+    if (isManifest) manifestPosts++
+    const r = await handleRelay(new Request('http://relay' + req.url, {
+      method: req.method,
+      headers: Object.fromEntries(Object.entries(req.headers).filter(([, v]) => v !== undefined)),
+      body: body.length ? body : undefined,
+    }), url.pathname, store)
+    const buf = Buffer.from(await r.arrayBuffer())
+    // 第一次清单 POST：**数据已经进房间了**，但响应丢掉、连接直接断——
+    // 精确复现"请求成功、响应在回程丢了"。
+    if (isManifest && manifestPosts === 1) { req.socket.destroy(); return }
+    const headers = {}
+    r.headers.forEach((v, k) => { headers[k] = v })
+    res.writeHead(r.status, headers)
+    res.end(buf)
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  cleanups.push(() => new Promise((r) => { server.closeAllConnections(); server.close(() => r()) }))
+  const base = `http://127.0.0.1:${server.address().port}`
+
+  const s = makeSession('manifest-response-lost')
+  const c = clientFor(base, s)
+  await c.open(s.manifestMessage)      // 不能抛错
+
+  assert.equal(manifestPosts, 1,
+    '重试路径必须先读 status 发现"其实已落库"，**不能再发一次 seq=0**' +
+    '（旧实现会撞 409 BAD_SEQ，然后因为它不可重试而整次失败）')
+  const st = await statusOf(base, s.roomName)
+  assert.equal(st.nextSeq, 1, '房间里应当正好一份清单')
+  assert.equal(c.posted, 1, '本地计数要与服务端对齐')
+  assert.equal(c.retryCount, 1, '应记录到一次重试（供 UI 显示链路不稳）')
+  assert.deepEqual(await readManifest(base, s.roomName), s.manifestMessage, '清单内容必须正确')
+})
 
 test('对同一个房间再次 open（自己的房间已就绪）→ 不重复投清单', async () => {
   const { base } = await startRelay()

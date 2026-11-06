@@ -52,6 +52,9 @@ export function tty({ noQr = false, noColor = false, machine = false,
 
   let lastProgressLen = 0
   const inlineProgress = (line) => {
+    // 机器可读模式：stdout 只留给 __READY__（自动化客户端按行解析），进度一律不打。
+    // 这条在 P1-1 修好后才真正有用 —— 从前 chunk 事件根本没到前端，进度条不动。
+    if (machine) return
     const pad = Math.max(0, lastProgressLen - stripAnsi(line).length)
     stdout.write('\r' + line + ' '.repeat(pad))
     lastProgressLen = stripAnsi(line).length
@@ -403,6 +406,7 @@ export function tty({ noQr = false, noColor = false, machine = false,
 
     /** 进度条本体（发送/接收共用）。`_transferStart`/`_lastFile` 由 `authed()` 重置。 */
     progressLine({ fileName, doneBytes, totalBytes }) {
+      if (machine) return          // 同上：机器可读模式下不往 stdout 写进度
       if (fileName !== api._lastFile) {
         if (api._lastFile) stdout.write('\n')
         api._lastFile = fileName
@@ -521,6 +525,48 @@ export function tty({ noQr = false, noColor = false, machine = false,
     },
   }
   return api
+}
+
+// ── 参数解析（命令行与图形界面共用）──────────────────────────
+
+/**
+ * 用法错误（参数写错）。
+ *
+ * 为什么需要单独的类 + `code`：退出码契约（行为与运行.md §5.2）规定
+ * "参数写错 = USAGE(2)"。而从解析函数里抛普通 Error 会被 `main().catch`
+ * 一律当成 ERROR(1) —— 用户拿到的退出码就错了（非法 `--timeout` 从前就是这样）。
+ */
+export class UsageError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'UsageError'
+    this.code = 'USAGE'
+  }
+}
+
+/**
+ * 解析时长：30s / 10m / 2h。
+ *
+ * ⚠️ 为什么放在这里、由命令行与图形界面**共用一份**：
+ *    图形界面从前自己写 `Number(flags.timeout)` —— `'30m'` 变成 NaN，
+ *    而 `NaN ?? 默认值` 仍是 NaN，`setTimeout(fn, NaN)` 按 1ms 触发：
+ *    用户按文档加了 `--timeout=30m`，链接刚出现、会话就"超时"销毁了。
+ *    （裸 `--timeout` 更糟：`Number(true)` 是 1。）
+ *
+ * @param {string|true|undefined} s
+ * @param {number} fallbackMs 没给这个选项时用的默认值
+ * @returns {number} 毫秒
+ * @throws {UsageError} 写法看不懂，或者**给了选项却没给值**
+ */
+export function parseDuration(s, fallbackMs) {
+  if (s === undefined) return fallbackMs
+  if (s === true) throw new UsageError('--timeout 后面要跟时长（例如 --timeout=30m）')
+  const m = String(s).match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i)
+  if (!m) throw new UsageError(`看不懂的时长：「${s}」（应为 30s / 10m / 2h）`)
+  const n = Number(m[1])
+  const unit = (m[2] ?? 'm').toLowerCase()
+  const mult = { ms: 1, s: 1000, m: 60000, h: 3600000 }[unit]
+  return Math.round(n * mult)
 }
 
 // ── 辅助 ────────────────────────────────────────────────────

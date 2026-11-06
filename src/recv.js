@@ -63,13 +63,21 @@ export function defaultSaveDir() {
  * @param {string} [opts.machineCertFile] 把会话 CA 以 PEM 写到这个路径（自动化用）
  * @param {string} [opts.pageHtml] `GET /` 返回的页面（M2 是手机上传页；这里由调用方给）
  * @param {(info:object)=>void} [opts.onReady]
+ * @param {Function} [opts.bindSignals] 注入信号绑定（测试用；默认 src/destroy.js 的 bindSignals）
  * @returns {Promise<{ok:boolean, reason:string, dir:string, files:string[], bytes:number, report:object, urls:object}>}
  */
 export async function runRecv(opts = {}) {
   const ui = tty({ noQr: opts.noQr, noColor: opts.noColor, machine: opts.machine })
   const dir = opts.dir ?? defaultSaveDir()
   const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000
-  const signals = bindSignals(new Destroyer({ log: () => {} }))
+  // ⚠️ 信号必须绑到**真正注册了销毁步骤**的那个 Destroyer 上（P1-2）。
+  //    从前这里 new 了一个空 Destroyer：Ctrl+C 时 bindSignals 确实被调用，但它跑的是
+  //    一张空清单 —— Root 里的会话 CA、flicker-cert-* 临时目录、挂着的冲突提问全都留着。
+  //    现在 destroyer 在 runRecv 这一层创建：既交给 bindSignals，也交给
+  //    startReceiveService 登记步骤；`service.stop()` 与信号销毁走同一个对象（幂等）。
+  //    `opts.bindSignals` 是测试注入点（用来断言"绑的就是这个 destroyer"）。
+  const destroyer = new Destroyer({ log: () => {} })
+  const signals = (opts.bindSignals ?? bindSignals)(destroyer)
 
   let service = null
   try {
@@ -77,6 +85,7 @@ export async function runRecv(opts = {}) {
       ...opts,
       dir,
       ui,
+      destroyer,
       onStop: () => ui.cancelAsks(),
       onServiceEvent: opts.onServiceEvent,
     })
@@ -136,6 +145,7 @@ export async function runRecv(opts = {}) {
  * @param {object} [opts.ui] tty 界面（只有命令行才需要；给了就用它打提示）
  * @param {(evt:object)=>void} [opts.onServiceEvent] 每次会话事件都回调一次（图形界面用它更新状态）
  * @param {()=>number} [opts.onStop] 销毁时先调一次（命令行用它结束挂着的提问）
+ * @param {import('./destroy.js').Destroyer} [opts.destroyer] 外部传入销毁器（runRecv 用它让信号共用一条销毁链）
  * @param {(info:object)=>void} [opts.onReady]
  * @returns {Promise<{urls:object, password:string, dir:string, port:number,
  *   receive:object, cert:object, trusted:boolean, stop:()=>Promise<object>}>}
@@ -147,7 +157,9 @@ export async function startReceiveService(opts = {}) {
   const plugins = opts.plugins ?? null
   let receive = null, cert = null, trusted = false
 
-  const destroyer = new Destroyer({ log: opts.onDestroyLog })
+  // 外部（runRecv）可以把同一个 destroyer 传进来，让信号与正常退出共用一条销毁链（P1-2）。
+  // 图形界面等调用方不传时保持原行为：自己建一个。
+  const destroyer = opts.destroyer ?? new Destroyer({ log: opts.onDestroyLog })
   const fail = async (err) => {
     registerRecvDestroySteps(destroyer, { receive, cert, trusted, plugins }, { dir, onStop: opts.onStop, ui })
     await destroyer.run().catch(() => {})
@@ -346,18 +358,21 @@ function registerRecvDestroySteps(destroyer, { receive, cert, trusted, plugins }
       return true
     })
     .step('一次性链接已失效', () => Boolean(receive?.session?.destroyed))
+    // ⚠️ 这三步**不能**声明 optional（P2-2）：删除失败必须进销毁清单的 ✗。
+    //    trust.untrustCa / removeFromMy 已是三态：false = 本来就没有（不适用），
+    //    失败会 throw。声明 optional 会把真正的失败又降级成"不适用"。
     .step('会话证书已从系统信任库移除', async () => {
       if (!trusted || !cert) return false
       return trust.untrustCa(cert.caThumbprint)
-    }, { optional: true })
+    })
     .step('服务器证书与私钥已从个人证书库移除', async () => {
       if (!cert) return false
       return trust.removeFromMy(cert.srvThumbprint)
-    }, { optional: true })
+    })
     .step('会话 CA 的本地副本已从个人证书库移除', async () => {
       if (!cert) return false
       return trust.removeFromMy(cert.caThumbprint)
-    }, { optional: true })
+    })
     .step('临时证书文件已删除', async () => {
       if (!cert?.cleanup) return false
       await cert.cleanup()

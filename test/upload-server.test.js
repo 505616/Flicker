@@ -19,14 +19,15 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises'
-import { createHash, randomBytes } from 'node:crypto'
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, open } from 'node:fs/promises'
+import { createCipheriv, createHash, randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { startReceiveServer, PART_SUFFIX } from '../src/upload-server.js'
 import { Session, SessionError, MAX_AUTH_FAILURES, errorBody } from '../src/session.js'
 import {
   deriveVerifier, deriveKeys, senderMac, receiverMac, sealManifest, sealChunk, PARAMS,
+  chunkAAD, chunkIV,
 } from '../src/suite/flicker1.js'
 
 const cleanups = []
@@ -128,6 +129,31 @@ function makePhone(base, password = PASSWORD, { token } = {}) {
         }
       }
       return sent
+    },
+    /**
+     * 按手机页的方式**并发**发块（默认 INFLIGHT=3）。
+     *
+     * 手机页固定 3 个 worker 同时上传，所以一个 ≥2 块文件的前 3 块会同时在路上 ——
+     * P1-1 的截断/句柄竞态正是这个窗口。这里的并发必须真的重叠（不是顺序 await）。
+     */
+    async sendChunksConcurrent(files, inFlight = 3) {
+      const jobs = []
+      for (let fi = 0; fi < files.length; fi++) {
+        const f = files[fi]
+        for (let ci = 0; ci < f.chunks; ci++) jobs.push({ fi, ci, f })
+      }
+      let next = 0
+      const worker = async () => {
+        while (next < jobs.length) {
+          const { fi, ci, f } = jobs[next++]
+          const start = ci * f.chunkBytes
+          const plain = f.bytes.subarray(start, Math.min(start + f.chunkBytes, f.size))
+          const { ct, tag } = sealChunk(keys.enc, fi, ci, f.chunks, plain)
+          const r = await post(`/up/chunk?f=${fi}&c=${ci}`, Buffer.concat([tag, ct]), { method: 'PUT' })
+          assert.equal(r.status, 200, `并发发块 f=${fi} c=${ci} 应当成功：${r.text}`)
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(inFlight, jobs.length) }, worker))
     },
     /** 单独发一块（可以故意改坏一个字节），用于反向验证 */
     async sendOneChunk(files, fi, ci, { corrupt = false } = {}) {
@@ -547,4 +573,333 @@ test('收到的文件在磁盘上真的是"完整文件"，不是只有大小对
     '三块文件的摘要必须一致（内容写错位置会在这里露出来）')
   const st = await stat(path.join(dir, 'three-chunks.bin'))
   assert.equal(st.size, big.length)
+})
+
+// ── ⑨ 并发写盘（P1-1）─────────────────────────────────────
+
+test('⭐ P1-1：同一文件 3 块并发写（手机页 INFLIGHT=3）→ 逐字节正确、只打开一次句柄、不泄漏', async () => {
+  // ⚠️ 旧写法 `if (!file.handle) file.handle = await open(partPath, 'w')` 在 3 个并发
+  //    PUT 下会被同时穿过：每个请求都 open(...,'w')，而 'w' **每次截断文件** ——
+  //    后打开的会把先写进去的块清掉；被覆盖的 FileHandle 也没人 close（fd 泄漏，
+  //    Node 会打印 "Closing file descriptor … on garbage collection"）。
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-recv-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  let opens = 0
+  const srv = await startReceiveServer({
+    dir, password: PASSWORD,
+    // 注入点：数一数同一个文件被 open 了几次
+    deps: { open: async (...args) => { opens++; return open(...args) } },
+  })
+  cleanups.push(() => srv.stop())
+
+  const files = makeFiles({ 'race.bin': randomBytes(PARAMS.chunkBytes * 4 + 321) })   // 5 块
+  const phone = makePhone(srv.url, PASSWORD, { token: srv.session.token })
+  await phone.handshake()
+  const m = await phone.sendManifest(files)
+  assert.equal(m.status, 200, m.text)
+
+  await phone.sendChunksConcurrent(files, 3)
+  assert.equal(opens, 1,
+    `同一个文件只应当 open 一次（实际 ${opens} 次；'w' 每次都会截断已写内容）`)
+  assert.ok(srv.state.accepted[0].handle, '写盘期间应当持有一个句柄')
+
+  const fin = await phone.finish()
+  assert.equal(fin.status, 200, fin.text)
+  assert.equal(fin.json.failed.length, 0, '不应当有整文件校验失败：' + JSON.stringify(fin.json.failed))
+  const got = await readFile(path.join(dir, 'race.bin'))
+  assert.equal(Buffer.compare(got, files[0].bytes), 0,
+    '并发写同一文件必须逐字节一致（截断/覆盖会在这里暴露）')
+  assert.equal(srv.state.accepted[0].handle, null, '收尾后句柄必须关闭（不能泄漏 fd）')
+  assert.equal(await readOrNull(path.join(dir, 'race.bin' + PART_SUFFIX)), null)
+})
+
+// ── ⑩ 清单的资源边界（P2-5）───────────────────────────────
+
+test('⭐ P2-5：chunkBytes 下界与块数上限 —— 内存型 DoS 在开工前拒绝', async () => {
+  const { base, token } = await boot()
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  const files = makeFiles({ 'a.bin': randomBytes(1000) })
+
+  // ① chunkBytes = 0：下界（>=1）不满足
+  let m = await phone.sendManifest(files, (w) => { w.files[0].chunkBytes = 0 })
+  assert.equal(m.status, 400, m.text)
+  assert.equal(m.json.error, 'BAD_CHUNK_BYTES')
+
+  // ② size 为负：chunks/size 不自洽
+  m = await phone.sendManifest(files, (w) => { w.files[0].size = -1 })
+  assert.equal(m.status, 400, m.text)
+  assert.equal(m.json.error, 'BAD_CHUNKS')
+
+  // ③ 块数对不上
+  m = await phone.sendManifest(files, (w) => { w.files[0].chunks = 3 })
+  assert.equal(m.status, 400, m.text)
+  assert.equal(m.json.error, 'BAD_CHUNKS')
+
+  // ④ ⭐ 核心：总量合法（200 GiB）但 chunkBytes=1 → 声明 2e11 块。
+  //    旧实现照着它分配 Uint8Array(2e11) 的位图（RangeError，或反复尝试把内存打满）。
+  m = await phone.sendManifest(files, (w) => {
+    w.files[0].size = 200 * 1024 ** 3
+    w.files[0].chunkBytes = 1
+    w.files[0].chunks = 200 * 1024 ** 3
+  })
+  assert.equal(m.status, 400, `超大块数必须在开工前拒绝：${m.text}`)
+  assert.equal(m.json.error, 'BAD_CHUNKS', '应当指出是块数不合理')
+  assert.match(m.json.message, /块数太多/, '错误信息要说清是"块数太多"')
+
+  // 反向：正常清单不受影响，仍然能收下并定稿
+  const okFiles = makeFiles({ 'ok.txt': Buffer.from('ok') })
+  const ok = await phone.sendManifest(okFiles)
+  assert.equal(ok.status, 200, ok.text)
+  await phone.sendChunks(okFiles)
+  assert.equal((await phone.finish()).status, 200)
+})
+
+// ── ⑪ 监听错误（P2-6）─────────────────────────────────────
+
+test('⭐ P2-6：端口被占用时 listen 必须 reject（不崩进程、不跑丢销毁链）', async () => {
+  const { base, token, srv } = await boot()
+  const dir2 = await mkdtemp(path.join(tmpdir(), 'flicker-recv-'))
+  cleanups.push(() => rm(dir2, { recursive: true, force: true }))
+  await assert.rejects(
+    () => startReceiveServer({ dir: dir2, password: PASSWORD, port: srv.port, host: '127.0.0.1' }),
+    (e) => {
+      assert.equal(e.code, 'EADDRINUSE', '应当保留 EADDRINUSE 供上层识别')
+      assert.match(e.message, /占用/, '要把 EADDRINUSE 变成一句人话')
+      return true
+    },
+    '端口占用必须变成可捕获的 reject —— 旧实现会以未处理 error 事件崩掉整个进程',
+  )
+  // 第一个服务不受影响：还能正常完成一次传输
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  const files = makeFiles({ 'alive.txt': Buffer.from('alive') })
+  assert.equal((await phone.sendManifest(files)).status, 200)
+  await phone.sendChunks(files)
+  assert.equal((await phone.finish()).status, 200)
+})
+
+// ── ⑫ 块失败计数是"连续"（P3-1）───────────────────────────
+
+test('⭐ P3-1：块失败上限是"连续"—— 中间成功一次就归零，零散坏块不该中止会话', async () => {
+  const { dir, base, token } = await boot()
+  const files = makeFiles({ 'flaky.bin': randomBytes(PARAMS.chunkBytes * 2 + 10) })   // 3 块
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  await phone.sendManifest(files)
+  const f = files[0]
+
+  // 每块先坏 9 次（低于上限 10）再修好：若按"累计"算，第 2 块就会到 18 次被中止
+  for (let ci = 0; ci < f.chunks; ci++) {
+    for (let i = 0; i < 9; i++) {
+      const bad = await phone.sendOneChunk(files, 0, ci, { corrupt: true })
+      assert.equal(bad.status, 400)
+      assert.equal(bad.json.error, 'E_CHUNK_AUTH',
+        `连续第 ${i + 1} 次坏块仍应是普通的验块失败（累计 10 次才会中止）`)
+    }
+    const good = await phone.sendOneChunk(files, 0, ci)
+    assert.equal(good.status, 200, `修好第 ${ci} 块应当成功（计数应已归零）`)
+  }
+  assert.equal((await phone.status()).status, 200, '会话必须还活着')
+  const fin = await phone.finish()
+  assert.equal(fin.status, 200, fin.text)
+  assert.equal(fin.json.done.length, 1)
+  const got = await readFile(path.join(dir, 'flaky.bin'))
+  assert.equal(Buffer.compare(got, f.bytes), 0)
+})
+
+test('⭐ P3-1：**连续**坏块到上限才中止会话（TOO_MANY_BAD_CHUNKS + 410）', async () => {
+  const { base, token } = await boot()
+  const files = makeFiles({ 'bad.bin': randomBytes(1000) })
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  await phone.sendManifest(files)
+  let last = null
+  for (let i = 0; i < 10; i++) last = await phone.sendOneChunk(files, 0, 0, { corrupt: true })
+  assert.equal(last.status, 400)
+  assert.equal(last.json.error, 'TOO_MANY_BAD_CHUNKS')
+  assert.equal((await phone.status()).status, 410, '到上限之后会话必须已销毁')
+})
+
+// ── ⑬ 接收模式的信号接线（P1-2）───────────────────────────
+
+test('⭐ P1-2：接收模式把信号绑定到**真正带销毁步骤的** Destroyer（不是空对象）', async () => {
+  const { runRecv } = await import('../src/recv.js')
+  const { Destroyer } = await import('../src/destroy.js')
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-recv-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+
+  let bound = null
+  let uninstalled = 0
+  // 注入 bindSignals：既拿到"被绑定的那个 destroyer"，也避免测试进程真的装信号处理器
+  const result = await runRecv({
+    dir, password: PASSWORD, timeoutMs: 250,
+    pageHtml: '<html></html>', noQr: true, noColor: true, machine: true,
+    bindSignals: (d) => {
+      bound = d
+      return { uninstall() { uninstalled++ }, trigger: () => d.run() }
+    },
+  })
+
+  assert.ok(bound instanceof Destroyer, '必须把一个 Destroyer 交给 bindSignals')
+  assert.ok(result.report, '正常退出应当拿到销毁清单')
+  assert.equal(bound._report, result.report,
+    '信号绑定的 Destroyer 必须就是 startReceiveService 登记步骤、service.stop() 执行的那个 —— ' +
+    '否则 Ctrl+C 跑的是空清单，Root 里的 CA 与临时证书目录都会残留')
+  assert.ok(result.report.done.includes('接收服务已关闭'),
+    '那份清单里必须有真正的销毁步骤（证明它不是空的）')
+  assert.equal(uninstalled, 1, '正常退出时必须卸掉信号监听')
+})
+
+// ── ⑭ 清单 sha256 必填（P3-3）────────────────────────────
+
+test('⭐ P3-3：清单缺 sha256 / 格式错 → 开工前拒绝整份清单，一个字节都不写', async () => {
+  // ⚠️ 旧实现把 sha256 当"可选"：缺了就跳过整文件校验直接改名定稿。
+  //    那等于把文件完整性交给对端的口头承诺 —— 与 pull 端同一条判据，必须在
+  //    manifest 阶段拒绝（此时还没有任何块落盘）。
+  const { dir, base, token } = await boot()
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  const good = makeFiles({ 'a.bin': randomBytes(1234) })
+
+  // ① 缺失
+  let m = await phone.sendManifest(good, (w) => { delete w.files[0].sha256 })
+  assert.equal(m.status, 400, m.text)
+  assert.equal(m.json.error, 'E_MANIFEST_UNVERIFIABLE')
+
+  // ② 格式错：太短 / 非十六进制 / 只有 63 位
+  for (const bad of ['abc', 'z'.repeat(64), good[0].sha256.slice(0, 63), null, 42]) {
+    m = await phone.sendManifest(good, (w) => { w.files[0].sha256 = bad })
+    assert.equal(m.status, 400, `sha256=${JSON.stringify(bad)} 应当被拒：${m.text}`)
+    assert.equal(m.json.error, 'E_MANIFEST_UNVERIFIABLE')
+  }
+
+  // 整份清单被拒 = 磁盘上不能留下任何东西（连 .flicker-part 都不该有）
+  const { readdir } = await import('node:fs/promises')
+  assert.deepEqual(await readdir(dir), [], '被拒的清单不该写出任何字节')
+  assert.equal((await phone.status()).status, 200,
+    '被拒的是清单不是会话：客户端修正后应当还能重发')
+
+  // ③ 修正之后（大写 sha256 也认，内部统一转小写）仍能正常收尾
+  const fixed = makeFiles({ 'a.bin': good[0].bytes })
+  fixed[0].sha256 = fixed[0].sha256.toUpperCase()
+  const ok = await phone.sendManifest(fixed)
+  assert.equal(ok.status, 200, ok.text)
+  await phone.sendChunks(fixed)
+  const fin = await phone.finish()
+  assert.equal(fin.status, 200, fin.text)
+  assert.equal(fin.json.done.length, 1)
+  assert.equal(createHash('sha256').update(await readFile(path.join(dir, 'a.bin'))).digest('hex'),
+    fixed[0].sha256.toLowerCase())
+})
+
+// ── ⑮ 认证失败退避（P2-1）────────────────────────────────
+
+test('⭐ P2-1：接收模式认证失败必须退避（复用 Session 的 1/2/4/8s 实现）', async () => {
+  // 文档 §4.6：每次失败延迟 1/2/4/8s 再回应。发送端 src/server.js 已经接了，
+  // 接收端的 /up/auth 从前**立即**返回 401 —— 同一份承诺在另一条路上不存在。
+  // 这里注入 sleep 记录"被要求等多久"，不真的睡。
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-recv-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  const sleeps = []
+  const srv = await startReceiveServer({
+    dir, password: PASSWORD,
+    deps: { sleep: async (ms) => { sleeps.push(ms) } },
+  })
+  cleanups.push(() => srv.stop())
+
+  // 第一次失败：走真实 HTTP /up/auth
+  const phone = makePhone(srv.url, PASSWORD, { token: srv.session.token })
+  const first = await phone.handshakeWrong()
+  assert.equal(first.status, 401)
+  assert.deepEqual(sleeps, [1000], '第一次失败应退避 1000ms 再回应')
+
+  // 第二次失败：服务端重新发挑战，再提交一个错的 MAC（仍走 HTTP 路径）
+  const challenge = srv.session.startAuth().challenge
+  const second = await fetch(`${srv.url}/up/auth`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mac: Buffer.alloc(32).toString('base64'), challenge, macProfile: 'v2' }),
+  })
+  assert.equal(second.status, 401)
+  assert.deepEqual(sleeps, [1000, 2000], '第二次失败应退避 2000ms（倍增，不是固定延迟）')
+
+  // 反向：成功认证不该再退避（成功路径不调用 applyFailureBackoff）
+  const a = srv.session.startAuth()
+  const keys = deriveKeys(deriveVerifier(PASSWORD, srv.session.salt))
+  const profile = a.macProfiles.includes('v2') ? 'v2' : 'v1'
+  const mac = senderMac(keys.auth, Buffer.from(a.challenge, 'base64'), { profile }).toString('base64')
+  const okRes = await fetch(`${srv.url}/up/auth`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mac, challenge: a.challenge, macProfile: profile }),
+  })
+  assert.equal(okRes.status, 200, '前两次失败后仍然可以用正确密码通过')
+  assert.equal(sleeps.length, 2, '成功认证不该再退避')
+})
+
+// ── ⑯ 解密长度必须等于清单声明（P3-4）────────────────────
+
+test('⭐ P3-4：GCM 通过但解密长度与声明不符 → 拒绝该块、不写盘', async () => {
+  // ⚠️ GCM 只认证 AAD 里的 plainLen **值**，不要求密文长度等于它。
+  //    持有密码的人可以发一块"认证通过但长度不对"的数据；旧实现直接按
+  //    plain.length 写盘，于是文件实际大小与清单不符也能定稿。
+  const { dir, base, token } = await boot()
+  const files = makeFiles({ 'len.bin': randomBytes(1000) })      // 单块，plainLen = 1000
+  const phone = makePhone(base, PASSWORD, { token })
+  await phone.handshake()
+  await phone.sendManifest(files)
+
+  /** 用真密钥加密，但 AAD 里的 plainLen 用**声明值**（与真实明文长度不同） */
+  const sealWrongLength = (encKey, declaredPlainLen, actualPlain) => {
+    const iv = chunkIV(0, 0)
+    const c = createCipheriv(PARAMS.aead, encKey, iv, { authTagLength: PARAMS.tagBytes })
+    c.setAAD(chunkAAD(0, 0, 1, declaredPlainLen))
+    const ct = Buffer.concat([c.update(actualPlain), c.final()])
+    return { ct, tag: c.getAuthTag() }
+  }
+  const put = (sealed) => fetch(`${base}/up/chunk?f=0&c=0`, {
+    method: 'PUT', headers: { 'X-Flicker-Sid': phone.sid },
+    body: Buffer.concat([sealed.tag, sealed.ct]),
+  })
+
+  for (const actualLen of [1001, 999]) {
+    const bad = await put(sealWrongLength(phone.keys.enc, 1000, randomBytes(actualLen)))
+    assert.equal(bad.status, 400, `长度 ${actualLen} 的块必须被拒（实际 ${bad.status}）`)
+    const j = await bad.json()
+    assert.equal(j.error, 'E_CHUNK_AUTH')
+    assert.match(j.message, /不一致/, '错误信息要说清"长度与清单声明不一致"')
+    assert.equal(await readOrNull(path.join(dir, 'len.bin' + PART_SUFFIX)), null,
+      '被拒的块不该写盘')
+  }
+
+  // 反向：长度正确的块照常收下并定稿（说明只挡了错误长度，没挡住正常路径）
+  const good = await put(sealChunk(phone.keys.enc, 0, 0, 1, files[0].bytes))
+  assert.equal(good.status, 200)
+  const fin = await phone.finish()
+  assert.equal(fin.status, 200, fin.text)
+  const got = await readFile(path.join(dir, 'len.bin'))
+  assert.equal(Buffer.compare(got, files[0].bytes), 0)
+})
+
+// ── ⑯ 手机上传页的 CSP（review P2：三套页面只有这一页漏了）──────
+
+test('手机上传页也带 CSP：XSS 时堵死向任意外部地址外发', async () => {
+  // ⚠️ 局域网接收页（server.js）与中继页（relay/protocol.js）都有 CSP，
+  //    唯独手机上传页没有 —— 而这页同样由 Node 服务发出，同样可能承载清单里
+  //    的文件名（渲染位置由页面决定）。缺 CSP 的表现是：一旦有 XSS，
+  //    可以 fetch 任意外部地址把数据带走，浏览器不会拦。
+  //    这里钉住四件事：default-src none、脚本只能内联、只能连自己、
+  //    以及基本的 nosniff（防止把上传页当别的类型解释）。
+  const { base } = await boot({ pageHtml: '<html><body>phone</body></html>' })
+  const r = await fetch(`${base}/`)
+  assert.equal(r.status, 200)
+  assert.match(r.headers.get('content-type') ?? '', /text\/html/)
+  const csp = r.headers.get('content-security-policy') ?? ''
+  assert.ok(csp, '手机上传页必须带 Content-Security-Policy（不能靠"反正是内网"）')
+  assert.match(csp, /default-src 'none'/, '默认什么都不许加载')
+  assert.match(csp, /script-src 'unsafe-inline'/, '脚本只有内联这一种来源')
+  assert.match(csp, /connect-src 'self'/, '页面只能连自己所在的服务，不能向任意外部地址外发')
+  assert.match(csp, /form-action 'none'/, '页面不许提交表单到外面')
+  assert.match(csp, /base-uri 'none'/, '不许改 base（那会把相对 URL 劫走）')
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal(r.headers.get('referrer-policy'), 'no-referrer')
 })

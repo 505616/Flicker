@@ -33,8 +33,14 @@ export function argOf(argv, name, fallback) {
   return hit ? hit.slice(name.length + 3) : fallback
 }
 
-/** 要检查的地方：构建脚本、体检脚本、演练脚本、测试 */
-export const DIRS = ['gen', '_lab', 'test']
+/**
+ * 要检查的地方：构建脚本、体检脚本、演练脚本、测试，以及**运行期源码**。
+ *
+ * ⚠️ `src` 是 2026-11 补进来的：`src/trust.js` 也会创建临时目录（`flicker-cert-`），
+ *    而判据以前只扫 gen/_lab/test —— 运行期代码里出现未登记前缀不会被发现。
+ *    `bin`/`web` 同理纳入（目前它们不建目录，但口径应当统一）。
+ */
+export const DIRS = ['gen', '_lab', 'test', 'src', 'bin', 'web']
 
 /**
  * `mkdtemp(tmpdir(), 'prefix-')` 的几种写法。

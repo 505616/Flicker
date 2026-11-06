@@ -30,11 +30,24 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
  * 只在 Windows 上跑的文件，附**具体原因**。
  *
  * 判据很硬：文件里必须真的出现 Windows 专属的命令或 API
- * （`certutil` / `powershell` / `Cert:\CurrentUser` / `--app=` 的 Edge 窗口 …）。
+ * （`certutil` / `powershell` / `Cert:\CurrentUser` / `'win32'` 平台分支 …）。
  * `--check` 会逐条扫源码验证这一点 —— 说"这个文件需要 Windows"却拿不出证据，
  * 就是在白丢覆盖率。
+ *
+ * ── 为什么现在是**空的**（2026-11 复核）──
+ * 空清单是结论，不是偷懒。曾经挡在 macOS/Linux 之外的 4 个文件都逐个复查过：
+ *   · `e2e.test.js` / `startup-order.test.js`：源码里没有任何 Windows 专属痕迹；
+ *   · `trust.test.js`：只有"装进系统证书库"那几条用例需要 Windows，它们在**文件内部**
+ *     用 `{ skip: skipStore }` 自 gate，其余用例（证书生成、结构自检）三平台都能跑；
+ *   · `gui.test.js`：唯一的平台分支在用例内部（`if (process.platform === 'win32')`），
+ *     不需要把整个文件挡掉。
+ * 所以三平台跑的是同一套文件。**真正的教训不是"清单为空"，而是这份清单必须只有一处**：
+ * 从前 `gen/run-tests.mjs` 自己藏着另一份 4 文件清单，而 `--check` 审计的是这里的空表，
+ * 于是"审计通过"与"实际跳过"完全脱钩 —— macOS/Linux 上最值钱的 e2e 被静默跳过，CI 却全绿。
+ * 现在 `run-tests.mjs` 直接 import 本文件的 `plan()`（清单可注入，见下），
+ * `test/test-plan.test.js` 会反向验"换成非空清单时过滤必须真的生效"。
  */
-const WINDOWS_ONLY = new Map()
+export const WINDOWS_ONLY = new Map()
 
 /** Windows 专属的痕迹：出现任一，才允许把文件列进 WINDOWS_ONLY */
 const WINDOWS_MARKERS = [
@@ -55,16 +68,22 @@ function windowsMarkersIn(rel) {
 
 /**
  * 所有测试文件
+ *
  * @param {string} [platform] 模拟的平台（默认本机）
+ * @param {Map<string,string>} [windowsOnly] 平台专属清单（默认本文件那份）。
+ *   **可注入是故意的**：`test/test-plan.test.js` 塞一份假的非空清单进来，
+ *   确认过滤逻辑真的生效 —— 空清单时"过滤"是一行永不执行到的代码，
+ *   没有注入就分不清"逻辑正确"和"逻辑根本没跑"。
+ * @returns {{platform:string, all:string[], files:string[], skipped:string[]}}
  */
-export function plan(platform = process.platform) {
+export function plan(platform = process.platform, windowsOnly = WINDOWS_ONLY) {
   const all = readdirSync(path.join(ROOT, 'test'))
     .filter((f) => f.endsWith('.test.js'))
     .sort()
     .map((f) => `test/${f}`)
 
   const isWindows = platform === 'win32'
-  const files = isWindows ? all : all.filter((f) => !WINDOWS_ONLY.has(f))
+  const files = isWindows ? all : all.filter((f) => !windowsOnly.has(f))
   const skipped = all.filter((f) => !files.includes(f))
   return { platform, all, files, skipped }
 }

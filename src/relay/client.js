@@ -20,7 +20,8 @@
  */
 import { open } from 'node:fs/promises'
 import { sealChunk, PARAMS } from '../suite/flicker1.js'
-import { packMessage, packBatch, MSG } from './protocol.js'
+import { packMessage, packBatch, packManifestParts, MSG } from './protocol.js'
+import { PROTOCOL_MIN_MESSAGE_BYTES } from '../chunk-size.js'
 import {
   isTransientError, retryDelay, batchOutcome, relayLink,
 } from './core.js'
@@ -48,7 +49,8 @@ export class RelayClient {
    * @param {string} o.roomName 房间名（64 位十六进制，由密码经 HKDF 派生）
    * @param {Buffer} o.encKey 加密密钥（K_enc）
    * @param {object} o.manifest 内部清单（含 absPath / _bytes，服务端形式）
-   * @param {number} [o.fetchTimeoutMs] 单次请求超时
+   * @param {number} [o.fetchTimeoutMs] 单次请求的**基础**超时（默认 30 s）
+   * @param {number} [o.maxFetchTimeoutMs] 请求超时的封顶值（默认 10 分钟）
    * @param {number} [o.retries] 瞬时故障的重试次数（默认 4）
    * @param {(info:object)=>void} [o.onRetry] 每次重试前的回调，用于告诉用户"正在重连"
    * @param {() => number} [o.now] 注入时钟，便于测试
@@ -56,6 +58,7 @@ export class RelayClient {
    */
   constructor({
     baseUrl, roomName, encKey, manifest, fetchTimeoutMs = 30_000,
+    maxFetchTimeoutMs = 10 * 60 * 1000,
     retries = 4, onRetry, now, sleep,
   }) {
     this.base = baseUrl.replace(/\/+$/, '')
@@ -63,6 +66,7 @@ export class RelayClient {
     this.encKey = encKey
     this.manifest = manifest
     this.timeout = fetchTimeoutMs
+    this.maxTimeout = Math.max(fetchTimeoutMs, maxFetchTimeoutMs)
     this.retries = retries
     this.onRetry = onRetry ?? (() => {})
     this._now = now ?? (() => Date.now())
@@ -90,6 +94,12 @@ export class RelayClient {
      * 协议保证的最小值（1 MiB + 17）走，于是新客户端 + 老中继也不会坏。
      */
     this.maxMessageBytes = null
+    /**
+     * 清单被拆成了几条消息（P1-2）。清单本身也是一条消息，但它可能超过单条上限，
+     * 所以 seq 0..manifestParts-1 是清单分片，数据块从 seq = manifestParts 开始。
+     * open() 里确定；在那之前按 1 条算（旧协议的形状）。
+     */
+    this.manifestParts = 1
     // 读文件的常驻缓冲：按**清单里实际用到的最大块**分配，不能写死协议默认值。
     // 写死的话，块比默认值大时 `fh.read(this._buf, 0, file.chunkBytes, …)` 读不满，
     // 下面那句 `bytesRead !== plainLen` 会把它当成"文件在传输过程中被改动" ——
@@ -99,12 +109,39 @@ export class RelayClient {
       ...(manifest?.files ?? []).map((f) => Number(f.chunkBytes) || 0)))
   }
 
+  /** 本次传输的总消息数（清单分片 + 数据块）。open() 之后才准确。 */
+  get totalMessages() {
+    return this.manifestParts + (this.manifest?.totalChunks ?? 0)
+  }
+
+  /**
+   * 这次请求该给多长的超时。
+   *
+   * ⚠️ 固定 30 秒是**按体积算出来的**：默认窗口 8 × 2 MiB ≈ 16 MiB，
+   *    30 秒要求上行 ≥ 4.5 Mbps。低于它的真实宽带/移动热点，
+   *    每个满窗批次都会在**上传阶段**被 AbortSignal 掐断，
+   *    然后重试、再掐断 —— 表现是"大文件传一半必断"。
+   *    这里按 64 KB/s 的最慢可接受上行补足传输时间，并封顶 10 分钟。
+   */
+  _timeoutFor(bodyLen) {
+    const bytes = Number(bodyLen) || 0
+    const transferMs = bytes > 0 ? Math.ceil(bytes / (64 * 1024)) * 1000 : 0
+    return Math.min(this.timeout + transferMs, this.maxTimeout)
+  }
+
   _url(suffix = '') {
     return `${this.base}/r/${this.room}${suffix}`
   }
 
   async _fetch(url, init = {}) {
-    const r = await fetch(url, { ...init, signal: AbortSignal.timeout(this.timeout) })
+    // ⚠️ init.body 可能是 Uint8Array / Buffer / string / 流。只给"知道长度"的算加成，
+    //    不知道（流）就按基础超时，宁可失败也不要无限等。
+    const bodyLen = typeof init.body === 'string' ? init.body.length
+      : (init.body?.byteLength ?? init.body?.length ?? 0)
+    const r = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(this._timeoutFor(bodyLen)),
+    })
     if (!r.ok) {
       let code = `HTTP_${r.status}`, message = `中继返回 ${r.status}`
       try { const j = await r.json(); code = j.error ?? code; message = j.message ?? message } catch { /* 非 JSON */ }
@@ -172,8 +209,17 @@ export class RelayClient {
       this.maxMessageBytes = created.maxMessageBytes
     }
 
+    // ── 清单分帧（P1-2）──
+    // 清单本身可能超过中继的单条上限（约 1 万个单块小文件就到 2.59 MB），
+    // 而它是一条消息。拆成 N 条、接收端拼回来 —— 中继依旧只按 seq 存不透明 blob。
+    // 注意：**一条都不例外**，哪怕清单很小也会带上 8 字节分片头（partCount=1），
+    // 这样接收端只有一种格式要处理，不会出现"小清单是旧格式、大清单是新格式"。
+    const maxMsg = this.maxMessageBytes ?? PROTOCOL_MIN_MESSAGE_BYTES
+    const parts = packManifestParts(manifestMessage, maxMsg)
+    this.manifestParts = parts.length
+
     if (created.created) {
-      await this._withRetry('manifest', () => this._put(0, manifestMessage))
+      await this._putManifestParts(parts)
     } else {
       // ⚠️ 房间已经存在。这里有**两种完全相反**的可能，必须分开处理 ——
       //    从前一律当"自己的房间"跳过投递，于是两种情况都会**静默失败**：
@@ -202,7 +248,7 @@ export class RelayClient {
         e.code = 'ROOM_TAKEN'
         throw e
       }
-      await this._withRetry('manifest', () => this._put(0, manifestMessage))
+      await this._putManifestParts(parts)
     }
 
     // 无论新旧房间，都以服务端状态为准
@@ -214,7 +260,61 @@ export class RelayClient {
   }
 
   async _put(seq, message) {
-    await this._fetch(this._url(`?seq=${seq}`), { method: 'POST', body: message })
+    // 也记入 _inFlight：用户可能在 open()（投清单）阶段点取消，
+    // destroy() 必须先等这条 POST 落定，否则 DELETE 会与它抢同一个房间。
+    const p = this._fetch(this._url(`?seq=${seq}`), { method: 'POST', body: message })
+    this._inFlight = p
+    try { await p } finally { this._inFlight = null }
+  }
+
+  /** 按序投递所有清单分片（seq = 0..parts.length-1） */
+  async _putManifestParts(parts) {
+    for (let i = 0; i < parts.length; i++) {
+      await this._putManifestPart(i, parts[i])
+    }
+  }
+
+  /**
+   * 投递一个清单分片 —— 并且**在重试/撞 409 时先对齐服务端**。
+   *
+   * ⚠️ 这是 P2-1 的修法。旧行为：`_withRetry('manifest', () => _put(0, …))`。
+   *    如果第一次 POST 其实已经落库、只是响应在回程丢了，重试会再发一次 seq=0，
+   *    服务端报 409 BAD_SEQ；而 BAD_SEQ 在 fatal 列表里 → 不再重试、直接失败。
+   *    房间其实已经可用，用户却看到"序号不连续"。
+   *
+   * 判据与 putBatch 完全同源：服务端的 nextSeq 是唯一权威。
+   * 期望的 nextSeq = i+1 说明这一片已经在了（landed）；
+   * 等于 i 说明没落库（安全重发）；涨到别处说明有别人在写（别猜，报错）。
+   */
+  async _putManifestPart(i, part) {
+    const wantNext = i + 1
+    try {
+      await this._withRetry('manifest', async (attempt) => {
+        if (attempt > 0) {
+          const st = await this.status().catch(() => null)
+          if (st) {
+            if (st.nextSeq === wantNext) return           // 上一次其实成功了
+            if (st.nextSeq !== i) throw this._desyncErr(i, st.nextSeq)
+          }
+        }
+        await this._put(i, part)
+      })
+    } catch (e) {
+      if (e.code !== 'BAD_SEQ') throw e
+      // BAD_SEQ 不在可重试名单里，但它恰恰可能是"其实已经成功"的信号（见上）
+      const st = await this.status().catch(() => null)
+      if (st && st.nextSeq === wantNext) return
+      if (st && st.nextSeq !== i) throw this._desyncErr(i, st.nextSeq)
+      throw e
+    }
+  }
+
+  /** 清单投递时服务端的 nextSeq 与预期不符：不猜，明确报错 */
+  _desyncErr(expectedNext, actualNext) {
+    const e = new Error(
+      `清单投递序号错乱：期望 nextSeq=${expectedNext}，服务端是 ${actualNext}`)
+    e.code = 'SEQ_DESYNC'
+    return e
   }
 
   /** 把清单打包成消息（salt + 加密清单 一起放，接收端一次就能拿到全部参数） */
@@ -279,7 +379,8 @@ export class RelayClient {
     // 代价：每撞一次多一次往返。窗口 8 时通常只有少数几条会撞，
     // 对总体吞吐影响很小。
     const attempt = async (trySeq) => {
-      const ordinal = trySeq - 1
+      // 数据块的全局序号从清单分片之后开始（旧协议这里写死 -1）
+      const ordinal = trySeq - this.manifestParts
       const { file, chunkIndex, plainLen } = this._locate(ordinal)
       const payload = await this._readChunk(file, chunkIndex, plainLen)
       const { ct, tag } = sealChunk(this.encKey, file.index, chunkIndex, file.chunks, payload.plain)
@@ -289,7 +390,7 @@ export class RelayClient {
       return { seq: trySeq, fileIndex: file.index, chunkIndex, bytes: plainLen, fileName: file.rel }
     }
 
-    const total = 1 + this.manifest.totalChunks
+    const total = this.totalMessages
     if (seq >= total) return null
 
     let result = null
@@ -336,6 +437,11 @@ export class RelayClient {
   }
 
 
+  /** 把已经计入 bytesPosted、但其实没发出去的字节退回去（中止/失败路径） */
+  _refund(meta) {
+    for (const m of meta) this.bytesPosted -= m.bytes
+  }
+
   /** 全局分块序号 → (文件, 文件内块号, 明文长度) */
   _locate(ordinal) {
     for (const file of this.manifest.files) {
@@ -362,15 +468,16 @@ export class RelayClient {
    * @returns {Promise<{seqs:number[], chunks:Array}>}
    */
   async putBatch(startSeq, count, { isAborted } = {}) {
-    const total = 1 + this.manifest.totalChunks
+    const total = this.totalMessages
     const items = []
     const meta = []
     for (let i = 0; i < count; i++) {
       // 每一轮都重新问一次：上面的 await 可能已经让 destroy() 插进来了
-      if (isAborted?.()) return { seqs: [], chunks: [], aborted: true }
+      if (isAborted?.()) { this._refund(meta); return { seqs: [], chunks: [], aborted: true } }
       const seq = startSeq + i
       if (seq >= total) break
-      const ordinal = seq - 1
+      // 数据块的全局序号从清单分片之后开始（旧协议这里写死 -1）
+      const ordinal = seq - this.manifestParts
       const { file, chunkIndex, plainLen } = this._locate(ordinal)
       const payload = await this._readChunk(file, chunkIndex, plainLen)
       try {
@@ -383,7 +490,9 @@ export class RelayClient {
       }
     }
     // 最后一道闸：发给中继之前再确认一次（上面最后一次 release 也可能让出）
-    if (!items.length || isAborted?.()) return { seqs: [], chunks: meta, aborted: true }
+    // ⚠️ 中止路径也要**退回 bytesPosted**（P3-5）：这些字节根本没发出去，
+    //    不退的话进度条会显示一个永远到不了的数字。
+    if (!items.length || isAborted?.()) { this._refund(meta); return { seqs: [], chunks: meta, aborted: true } }
 
     // ── 重试的歧义，以及为什么可以安全解决 ──────────────────────
     //
@@ -450,6 +559,18 @@ export class RelayClient {
   async status() {
     const r = await this._fetch(this._url())
     return r.json()
+  }
+
+  /**
+   * 带重试的状态轮询（P1-4）。
+   *
+   * 状态查询是**纯读**的，重试没有任何副作用；而长传输要轮询几百次，
+   * 一次代理 5xx / 链路抖动就 throw 会直接销毁房间、把已传进度全废掉。
+   * 判据与其它请求同源（isTransientError）：只有瞬时故障才重试，
+   * NO_ROOM / EXPIRED / GONE 仍会立刻抛出，由发送端按"房间没了"收场。
+   */
+  async statusWithRetry() {
+    return this._withRetry('status', () => this.status())
   }
 
   /** 销毁房间（用完即销毁的落点） */

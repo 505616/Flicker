@@ -413,7 +413,14 @@ test('接线：命令行 / 界面 / 接收服务 / 中继都按平面建注册�
 
   const gui = await read('src/gui.js')
   assert.match(gui, /planes: \['sender', 'receive'\]/, '界面两个方向都要允许')
-  assert.match(gui, /plugins: plugins\?\.count \? plugins : null/, '界面起接收服务时要把插件传下去')
+  // P2-1：插件注册表是一次性的（dispose 后订阅全失效、apply 不能跑第二遍），
+  // 而界面进程比一场传输活得久 —— 所以现在每场传输/接收都从入口那份**克隆**一份，
+  // 接收服务拿到的是 recvPlugins。锚点跟着改，但仍然钉住"传的是插件注册表"这件事。
+  assert.match(gui, /async function freshPlugins\(\)[\s\S]{0,400}createPluginRegistry\(/,
+    '界面每场传输要新建一份注册表（一次性注册表不能跨场复用）')
+  assert.match(gui, /const recvPlugins = await freshPlugins\(\)/,
+    '界面起接收服务时要用这一场的注册表')
+  assert.match(gui, /plugins: recvPlugins,/, '插件必须交给 startReceiveService')
 
   const recv = await read('src/recv.js')
   assert.match(recv, /EVENTS\.RECV_READY/, 'ready 必须在服务就绪时发')

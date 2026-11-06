@@ -85,6 +85,8 @@ export const STRINGS = {
       '但如果想边收边写盘（更稳、也不占内存），请点「取消」，' +
       '重新开始并在文件夹窗口里选 <b>允许</b>。',
     'recv.go.reconnecting': '链路不稳，正在重连（{n}/{max}）…',
+    // P2-6：目录写盘失败不许静默退回内存拼装 —— 明确告诉用户发生了什么
+    'recv.go.dirFallbackWarn': '这个文件（{name}）无法写入你选的目录（{reason}），已经改为先收进内存再保存 —— 大文件可能因此中途失败。',
 
     // ── 接收端：完成屏 ──
     'recv.done.title': '传输完成',
@@ -112,6 +114,11 @@ export const STRINGS = {
     'recv.msg.wantSend': '对方想给你发 {n} 个文件',
     'recv.msg.receiving': '接收中',
     'recv.msg.about': '约 {time}',
+    // P1-2（清单分帧）：分帧头里的条数不在合法范围
+    'recv.msg.badManifestParts': '清单的分帧数量不对（{n}，上限 {max}）—— 对方可能不是本程序，或者数据已经损坏。',
+    // 目录里已有同名文件、用户在询问里选择了"跳过"
+    'recv.msg.skipExisting': '已按你的选择跳过「{name}」',
+    'recv.msg.tooManyDupes': '「{name}」的同名文件太多，找不到可用的新名字',
 
     // ── 接收端：完成屏明细 ──
     'recv.done.detail': '{n} 个文件 · {size} · 用时 {time} · 平均 {rate}/s',
@@ -178,6 +185,8 @@ export const STRINGS = {
     'recv.err.E_PATH_UNSAFE.m': '清单里的这个路径不能用：{name}（规则 {rule}）。为安全起见一个字节都没有写入。',
     'recv.err.E_MANIFEST_DUPLICATE_PATH.t': '有两个文件会撞在一起，已停止',
     'recv.err.E_MANIFEST_DUPLICATE_PATH.m': '「{a}」与「{b}」在你的系统上会是同一个文件，继续写会静默覆盖掉一个。为避免丢文件，一个字节都没有写入。',
+    'recv.err.DECRYPT_MANIFEST.t': '清单解密失败',
+    'recv.err.DECRYPT_MANIFEST.m': '清单无法解密 —— 数据可能被篡改或损坏。请让对方重新发起传输。',
     'recv.err.hint.badPassword': '确认双方输入的是同一个密码（区分大小写与空格）',
 
     // ── 发送端：标题 ──
@@ -326,6 +335,9 @@ export const STRINGS = {
     'phone.pick.clear': '全部清空',
     'phone.pick.start': '开始发送',
     'phone.pick.resume': '继续发送（接着上次没传完的）',
+    // P1-3/P2-1：名单发出去之后选择集冻结，增删都不再允许
+    'phone.pick.locked': '这次会话的名单已经发出去了，不能再增删文件。点「继续发送」接着传；想换文件请让电脑重新发起接收。',
+    'phone.pick.skippedSome': '已跳过 {n} 个文件：{list}',
     'phone.pick.hashing': '正在计算校验值 {done}/{n}（手机上这步略慢，之后电脑才能验证完整性）',
     'phone.pick.hashDone': '校验值已算好，可以发送了',
     'phone.pick.waitHash': '校验值还在算，稍等一下…',
@@ -340,6 +352,8 @@ export const STRINGS = {
     'phone.go.keepAwake': '请让这个页面保持在前台，别熄屏 —— 切到别的应用会被浏览器冻住（回来会自动接着传）',
     'phone.go.resume': '从上次中断的地方继续（还有 {n} 块）',
     'phone.go.retrying': '网络抖了一下，正在重试（{n}/{max}）',
+    // P2-2：非幂等请求失败后先向电脑确认状态，别让用户以为卡住了
+    'phone.go.recovering': '连接中断了，正在向电脑确认进度…',
     'phone.done.head': '全部发完了',
     'phone.done.detail': '{n} 个文件 · {size} · 用时 {time}',
     'phone.done.renamed': '有 {n} 个文件电脑上本来就有同名的，已自动改名保存（比如「照片 (1).jpg」）',
@@ -365,6 +379,8 @@ export const STRINGS = {
     'phone.err.E_CHUNK_AUTH.m': '传输途中有字节被改动或丢失（隧道的加密校验拦住了它），程序会自动重发这一块。',
     'phone.err.INCOMPLETE.t': '电脑说还缺数据',
     'phone.err.INCOMPLETE.m': '有几块没收到。点重试会先问电脑缺哪些，只补那些。',
+    'phone.err.MANIFEST_CHANGED.t': '文件清单对不上了',
+    'phone.err.MANIFEST_CHANGED.m': '这次会话的文件列表已经固定，但本地记录与它不一致。请刷新页面，让电脑重新发起一次接收。',
     'phone.err.NO_SPACE.t': '电脑磁盘空间不够',
     'phone.err.NO_SPACE.m': '电脑那边算下来放不下这些文件，已经在写任何东西之前停下了。清出空间后重新发起即可。',
     'phone.err.TOO_MANY_FILES.t': '文件太多',
@@ -531,6 +547,8 @@ export const STRINGS = {
       'To stream to disk instead (safer, no memory use), click Cancel, start again and choose ' +
       '<b>Allow</b> in the folder prompt.',
     'recv.go.reconnecting': 'Connection unstable — reconnecting ({n}/{max})…',
+    // P2-6: never silently fall back to in-memory assembly when the chosen folder fails
+    'recv.go.dirFallbackWarn': 'This file ({name}) could not be written into the folder you chose ({reason}), so it will be assembled in memory instead — large files may fail partway.',
 
     // ── Receiver: done ──
     'recv.done.title': 'Transfer complete',
@@ -560,6 +578,11 @@ export const STRINGS = {
     'recv.msg.wantSend': 'Someone wants to send you {n} files',
     'recv.msg.receiving': 'Receiving',
     'recv.msg.about': 'about {time}',
+    // P1-2 (manifest framing): the frame count in the header is out of range
+    'recv.msg.badManifestParts': 'The manifest was split into an invalid number of frames ({n}; the limit is {max}) — the other side may not be this program, or the data is corrupted.',
+    // The target folder already had this file and the user chose to skip it
+    'recv.msg.skipExisting': 'Skipped "{name}" as you asked',
+    'recv.msg.tooManyDupes': 'Too many files named "{name}" — could not find a free name',
 
     // ── Receiver: done screen detail ──
     'recv.done.detail': '{n} files · {size} · {time} · {rate}/s average',
@@ -635,6 +658,8 @@ export const STRINGS = {
     'recv.err.E_PATH_UNSAFE.m': 'A path in the manifest cannot be used: {name} (rule {rule}). Nothing was written to disk.',
     'recv.err.E_MANIFEST_DUPLICATE_PATH.t': 'Two files would collide — stopped',
     'recv.err.E_MANIFEST_DUPLICATE_PATH.m': '"{a}" and "{b}" would be the same file on your system; writing both would silently overwrite one. Nothing was written to disk.',
+    'recv.err.DECRYPT_MANIFEST.t': 'Could not decrypt the manifest',
+    'recv.err.DECRYPT_MANIFEST.m': 'The manifest could not be decrypted — the data may be tampered with or corrupted. Ask the other side to start a new transfer.',
     'recv.err.hint.badPassword': 'Make sure both sides typed the same password (case and spaces matter)',
 
     // ── Sender: titles ──
@@ -786,6 +811,9 @@ export const STRINGS = {
     'phone.pick.clear': 'Clear all',
     'phone.pick.start': 'Start sending',
     'phone.pick.resume': 'Resume (continue the parts that did not finish)',
+    // P1-3/P2-1: the selection is frozen once the manifest has been sent
+    'phone.pick.locked': 'The file list for this session has already been sent, so files can no longer be added or removed. Tap "Resume" to carry on; to send different files, start a new receive session on the computer.',
+    'phone.pick.skippedSome': 'Skipped {n} file(s): {list}',
     'phone.pick.hashing': 'Computing checksums {done}/{n} (slower on a phone; the computer needs them to verify integrity)',
     'phone.pick.hashDone': 'Checksums ready — you can send now',
     'phone.pick.waitHash': 'Still computing checksums, one moment…',
@@ -800,6 +828,8 @@ export const STRINGS = {
     'phone.go.keepAwake': 'Keep this page in the foreground and the screen awake — a backgrounded page gets frozen by the browser (it resumes automatically when you come back)',
     'phone.go.resume': 'Resuming where it stopped ({n} chunks left)',
     'phone.go.retrying': 'The network hiccuped, retrying ({n}/{max})',
+    // P2-2: after a non-idempotent failure, ask the computer for its state first
+    'phone.go.recovering': 'The connection dropped — checking the progress with the computer…',
     'phone.done.head': 'Everything sent',
     'phone.done.detail': '{n} files · {size} · took {time}',
     'phone.done.renamed': '{n} file(s) already existed on the computer and were saved under a new name (e.g. "photo (1).jpg")',
@@ -825,6 +855,8 @@ export const STRINGS = {
     'phone.err.E_CHUNK_AUTH.m': 'Bytes were changed or lost on the way (the tunnel encryption caught it); the program resends that chunk automatically.',
     'phone.err.INCOMPLETE.t': 'The computer says data is missing',
     'phone.err.INCOMPLETE.m': 'Some chunks did not arrive. Retrying first asks the computer what is missing and sends only that.',
+    'phone.err.MANIFEST_CHANGED.t': 'The local file list does not match',
+    'phone.err.MANIFEST_CHANGED.m': 'The file list for this session is fixed, but the local copy no longer matches it. Reload the page and start a fresh receive session on the computer.',
     'phone.err.NO_SPACE.t': 'Not enough space on the computer',
     'phone.err.NO_SPACE.m': 'The computer calculated that these files do not fit and stopped before writing anything. Free some space and start again.',
     'phone.err.TOO_MANY_FILES.t': 'Too many files',

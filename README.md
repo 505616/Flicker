@@ -155,7 +155,7 @@ been verified on real phones". Real-device testing is still waiting for the cond
 [`docs/路线图.md`](docs/路线图.md) item 7b); if what you see differs from the docs, please open an issue ——
 at this stage that is the most valuable information there is.
 
-**Tests: 816 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
+**Tests: 929 cases, 0 failures.** The number of skips depends on what the machine can do, so it is
 deliberately **not** pinned here — every skipped case prints its own reason when the suite runs
 (this run: 1 locally, 5 in CI):
 

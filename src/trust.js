@@ -18,8 +18,9 @@
  * 调用方应捕获 NOT_SUPPORTED 并降级到 --no-cert-install（手动信任引导）。
  */
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { promisify } from 'node:util'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { isIP } from 'node:net'
 import path from 'node:path'
@@ -91,6 +92,52 @@ export const CA_SUBJECT_MARK = 'Flicker Session CA'
 
 /** 临时证书目录的统一前缀（生成与清理必须一致） */
 const TEMP_CERT_PREFIX = 'flicker-cert-'
+
+/**
+ * "这张 CA 是哪个进程装的"记录文件名（P2-3）。
+ *
+ * 放在该会话自己的临时证书目录里 —— 目录随会话销毁一起删除，
+ * 所以记录的生命周期与"安装者"一致。
+ */
+export const CA_OWNER_FILE = 'flicker-ca-owner.json'
+
+/** 与 session-cert.js 的 caThumbprint 同一口径（SHA-1 大写十六进制）：certutil 按它定位证书 */
+function sha1Thumbprint(buf) {
+  return createHash('sha1').update(buf).digest('hex').toUpperCase()
+}
+
+/**
+ * 进程是否还活着。用于判断"装这张 CA 的实例还在不在"（P2-3）。
+ *
+ * `process.kill(pid, 0)` 不发信号，只探测存在性；EPERM 说明进程在但没权限，
+ * 同样算"活着"。
+ */
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return e?.code === 'EPERM'
+  }
+}
+
+/** 读所有实例留下的安装者记录：thumbprint → { thumbprint, pid, createdAt } */
+async function readCaOwnerRecords() {
+  const out = new Map()
+  let names = []
+  try { names = await readdir(tmpdir()) } catch { return out }
+  for (const name of names) {
+    if (!name.startsWith(TEMP_CERT_PREFIX)) continue
+    try {
+      const j = JSON.parse(await readFile(path.join(tmpdir(), name, CA_OWNER_FILE), 'utf8'))
+      if (j && typeof j.thumbprint === 'string' && Number.isInteger(j.pid)) {
+        out.set(j.thumbprint.toUpperCase(), j)
+      }
+    } catch { /* 目录里没有记录 / 已删除：按"没有安装者信息"处理 */ }
+  }
+  return out
+}
 
 export class CertError extends Error {
   constructor(message, code) {
@@ -325,9 +372,19 @@ export async function generateSession(opts) {
     //    · My  库：从前 PowerShell 会把 CA 与服务器证书都放进 My，
     //              一度悄悄积累了 148 张 —— 现在不放了，但**仍然扫一遍**，
     //              因为可能是更早的版本留下的
-    await untrustCa(caThumbprint)
-    await removeFromMy(srvThumbprint)
-    await removeFromMy(caThumbprint)
+    // ⚠️ 三处清理各自独立尝试（P2-2）：任何一处失败都要继续做后面的，最后**汇总抛错**，
+    //    销毁清单据此显示 ✗。旧实现直接忽略返回值，删除失败被当成"不适用"，
+    //    用户看到"清理完成"而 Root 库里的会话 CA 其实还在。
+    const problems = []
+    try {
+      await untrustCa(caThumbprint)             // 返回 false = 本来就没有（不适用）
+    } catch (e) { problems.push(`信任库: ${e?.message ?? e}`) }
+    try {
+      await removeFromMy(srvThumbprint)
+    } catch (e) { problems.push(`个人证书库（服务器证书）: ${e?.message ?? e}`) }
+    try {
+      await removeFromMy(caThumbprint)
+    } catch (e) { problems.push(`个人证书库（CA 副本）: ${e?.message ?? e}`) }
     // 临时目录：**重试两次**再认输。
     //
     // ⚠️ Windows 上刚被别的进程碰过的目录会短暂地删不掉（EPERM/EBUSY），
@@ -345,7 +402,8 @@ export async function generateSession(opts) {
         await new Promise((r) => setTimeout(r, 150 * (i + 1)))
       }
     }
-    if (lastErr) throw lastErr      // 三次都不行就抛出去：销毁清单里会显示 ✗（不假装删了）
+    if (lastErr) problems.push(`临时证书目录: ${lastErr.message}`)
+    if (problems.length) throw new Error(problems.join('；'))   // 销毁清单里会显示 ✗（不假装删了）
   }
 
   return {
@@ -407,34 +465,73 @@ export async function rootStoreCount() {
  */
 export async function findResidualCa() {
   if (!isWindows) return []
+  // NotBefore 也要读出来：P2-3 的残留清理需要估算"这张证书是多久以前创建的"
+  // （会话证书的有效期是 7 天，光看 NotAfter 分不出新旧；NotBefore 是创建时间 - 5 分钟）。
   const ps = `Get-ChildItem Cert:\\CurrentUser\\Root -ErrorAction Stop | ` +
     `Where-Object { $_.Subject -like '*${CA_SUBJECT_MARK}*' } | ` +
-    `ForEach-Object { "$($_.Thumbprint)|$($_.Subject)|$($_.NotAfter.ToString('s'))" }`
+    `ForEach-Object { "$($_.Thumbprint)|$($_.Subject)|$($_.NotAfter.ToString('s'))|$($_.NotBefore.ToString('s'))" }`
   const { stdout } = await pexec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
     { windowsHide: true, env: psEnv() })
   return stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => {
-    const [thumbprint, subject, notAfter] = line.split('|')
-    return { thumbprint, subject, notAfter }
+    const [thumbprint, subject, notAfter, notBefore] = line.split('|')
+    return { thumbprint, subject, notAfter, notBefore }
   })
 }
 
+/** session-cert.js 生成时把 notBefore 往前拨 5 分钟（容忍时钟偏差）—— 估算创建时间要加回来 */
+const CERT_CLOCK_SKEW_MS = 5 * 60_000
+/** 没有安装者记录时，默认只清"创建超过 10 分钟"的残留（P2-3） */
+const RESIDUAL_MIN_AGE_MS = 10 * 60_000
+
 /**
  * 约束 2：清理上次异常退出留下的残留证书。
- * 因为卸载只能靠 certutil，被强杀（或断电）时会残留，所以启动时必须自扫自清。
- * @returns {Promise<{removed:string[], failed:{thumbprint:string,error:string}[]}>}
+ *
+ * ⚠️ 不能"看到 Flicker Session CA 就删"（P2-3）：同一个用户可以同时跑两个实例
+ * （GUI + CLI，或两个终端），第二个实例启动时会把第一个实例**正在使用的** CA
+ * 从 Root 库删掉 —— 第一个实例的页面之后每次 TLS 重连都会因"签发者不受信任"失败，
+ * 而原因极难查。所以删除前按三条判据筛（满足任一条才删）：
+ *
+ *   ① 安装者记录（`flicker-ca-owner.json`）指向的进程**还活着** → 别的实例在用，不删；
+ *   ② 记录指向的是**本进程** → 本实例自己的退出清理，可以删；
+ *   ③ 记录指向的进程已不在 / 没有记录 → 按"够不够旧"兜底（没有记录的旧版本遗留）。
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.olderThanMs] 没有安装者记录时，只清早于这个时长的证书，默认 10 分钟
+ * @param {() => number} [opts.now] 注入时钟（测试用）
+ * @param {(pid:number) => boolean} [opts.isAlive] 注入进程存活判据（测试用）
+ * @returns {Promise<{removed:string[], failed:{thumbprint:string,error:string}[], kept:string[]}>}
  */
-export async function cleanResidual() {
+export async function cleanResidual({ olderThanMs = RESIDUAL_MIN_AGE_MS, now = Date.now, isAlive = processAlive } = {}) {
   const found = await findResidualCa()
-  const removed = [], failed = []
+  const removed = [], failed = [], kept = []
+  if (found.length === 0) return { removed, failed, kept }
+
+  const owners = await readCaOwnerRecords()
+  const nowMs = typeof now === 'function' ? now() : Number(now)
   for (const c of found) {
+    const thumb = String(c.thumbprint ?? '').toUpperCase()
+    if (!thumb) continue
+    const owner = owners.get(thumb)
+    let stale
+    if (owner) {
+      if (owner.pid === process.pid) stale = true                  // 属于本实例：退出清理必须能清掉
+      else if (isAlive(owner.pid)) { kept.push(thumb); continue }  // 别的实例正在用：绝不删
+      else stale = true                                            // 安装者已不在：是崩溃遗留
+    } else {
+      // 没有记录（旧版本安装的，或记录已随临时目录被清掉）→ 只能按时间兜底。
+      // 注意 notBefore 是"创建时间 - 5 分钟"，所以要加回 5 分钟才接近真实创建时间。
+      const createdAt = Date.parse(c.notBefore) + CERT_CLOCK_SKEW_MS
+      stale = Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt >= olderThanMs
+    }
+    if (!stale) { kept.push(thumb); continue }
     try {
-      await pexec('certutil', ['-user', '-delstore', 'Root', c.thumbprint], { windowsHide: true })
-      removed.push(c.thumbprint)
+      await pexec('certutil', ['-user', '-delstore', 'Root', thumb], { windowsHide: true })
+      removed.push(thumb)
     } catch (e) {
-      failed.push({ thumbprint: c.thumbprint, error: (e.stderr || e.message || '').toString().trim() })
+      failed.push({ thumbprint: thumb, error: (e.stderr || e.message || '').toString().trim() })
     }
   }
-  return { removed, failed }
+  return { removed, failed, kept }
 }
 
 /**
@@ -446,31 +543,73 @@ export async function trustCa(caDer, workDir) {
   await writeFile(cerPath, caDer)
   try {
     await pexec('certutil', ['-user', '-addstore', '-f', 'Root', cerPath], { windowsHide: true })
-    return true
   } catch (e) {
     throw new CertError(
       `无法把证书装入信任库: ${(e.stderr || e.message || '').toString().trim()}\n` +
       '如果是企业策略限制，请改用 --no-cert-install。',
       'TRUST_FAILED')
   }
+  // P2-3：记下"这张 CA 是哪个进程装的"。启动时的残留清理靠它区分
+  // "另一个实例正在用的 CA"（不能删）与"崩溃遗留的 CA"（该删）。
+  // 写记录失败不影响安装成功：最坏退化成 cleanResidual 的按时间兜底。
+  try {
+    await writeFile(path.join(workDir, CA_OWNER_FILE), JSON.stringify({
+      thumbprint: sha1Thumbprint(caDer),
+      pid: process.pid,
+      createdAt: Date.now(),
+    }))
+  } catch { /* 尽力而为 */ }
+  return true
+}
+
+/** Root 库里是否真的有这张证书。读不到证书库时**必须抛错**（不能当成"没有"） */
+async function rootHasThumbprint(thumb, run = pexec) {
+  if (!isWindows) return false
+  const ps = `Get-ChildItem Cert:\\CurrentUser\\Root -ErrorAction Stop | ` +
+    `Where-Object { $_.Thumbprint -eq '${thumb}' } | ` +
+    `Select-Object -First 1 -ExpandProperty Thumbprint`
+  const { stdout } = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { windowsHide: true, env: psEnv() })
+  return stdout.trim().length > 0
 }
 
 /**
  * 从信任库移除 CA。
  * ⚠️ 只能用 certutil —— Remove-Item 删不掉 Root 库
  * （实测报 "The operation is on user root store and UI is not allowed."）
+ *
+ * P2-2：这里返回**三态**，不能把"失败"和"本来就没有"混成一个 false ——
+ *   · 证书不存在 → `false`（销毁清单记 – 不适用）
+ *   · 删除成功   → `true`（记 ✓）
+ *   · 删除失败   → **throw**（记 ✗；旧实现 catch 成 false，清单显示"不适用"，
+ *                 用户以为清理干净了，而会话 CA 其实永久留在了 Root 库）
+ *
+ * @param {string} thumbprint SHA-1 指纹
+ * @param {{has?:(thumb:string)=>Promise<boolean>, pexec?:(...a:any[])=>Promise<any>}} [deps] 测试注入
  * @returns {Promise<boolean>}
  */
-export async function untrustCa(thumbprint) {
+export async function untrustCa(thumbprint, deps = {}) {
   if (!thumbprint) return false
-  const thumb = thumbprint.replace(/[^0-9A-Fa-f]/g, '')
+  const thumb = String(thumbprint).replace(/[^0-9A-Fa-f]/g, '').toUpperCase()
+  if (!thumb) return false
+  const has = deps.has ?? rootHasThumbprint
+  const run = deps.pexec ?? pexec
+  // 先确认真实存在：不存在才叫"不适用"
+  if (!(await has(thumb))) return false
   try {
-    await pexec('certutil', ['-user', '-delstore', 'Root', thumb], { windowsHide: true })
-    return true
-  } catch {
-    // 移除失败不抛错：销毁流程要继续走完，最后会报告给用户
-    return false
+    await run('certutil', ['-user', '-delstore', 'Root', thumb], { windowsHide: true })
+  } catch (e) {
+    throw new CertError(
+      `无法从信任库移除会话 CA（${(e?.stderr || e?.message || String(e)).toString().trim().slice(0, 300)}）—— ` +
+      '它可能仍在「受信任的根证书颁发机构」里，请手动删除',
+      'UNTRUST_FAILED')
   }
+  // certutil 有过"退出码 0 但没删掉"的记录（指纹用错时）—— 必须再查一遍，
+  // 否则销毁清单会显示 ✓ 而证书还在，即项目最忌讳的假阴性。
+  if (await has(thumb)) {
+    throw new CertError('certutil 报告成功，但会话 CA 仍在信任库里 —— 请手动删除', 'UNTRUST_FAILED')
+  }
+  return true
 }
 
 /** 把服务器证书与私钥从个人证书库删除 */
@@ -486,17 +625,37 @@ export async function removeServerCert(thumbprint) {
  *    悄悄积累了 148 张 `CN=Flicker Session CA` —— 正是"用完即销毁"要防的事。
  *    所以 CA 的 My 库副本也必须删。
  */
-export async function removeFromMy(thumbprint) {
-  if (!thumbprint || !isWindows) return false
-  const thumb = thumbprint.replace(/[^0-9A-Fa-f]/g, '')
+export async function removeFromMy(thumbprint, deps = {}) {
+  if (!thumbprint) return false
+  const thumb = String(thumbprint).replace(/[^0-9A-Fa-f]/g, '').toUpperCase()
   if (!thumb) return false
+  const has = deps.has ?? myHasThumbprint
+  const run = deps.pexec ?? pexec
+  // P2-2：同 untrustCa —— 不存在返回 false（不适用），删除失败必须 throw（✗），
+  // 不能把"失败"伪装成"本来就没有"。
+  if (!(await has(thumb))) return false
   try {
-    await pexec('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+    await run('powershell', ['-NoProfile', '-NonInteractive', '-Command',
       `Get-ChildItem Cert:\\CurrentUser\\My -ErrorAction Stop | ` +
       `Where-Object { $_.Thumbprint -eq '${thumb}' } | Remove-Item -Force`],
     { windowsHide: true, env: psEnv() })
-    return true
-  } catch { return false }
+  } catch (e) {
+    throw new CertError(
+      `无法从个人证书库删除证书（${(e?.stderr || e?.message || String(e)).toString().trim().slice(0, 300)}）`,
+      'REMOVE_MY_FAILED')
+  }
+  return true
+}
+
+/** 个人证书库里是否真的有这张证书。读不到证书库时**必须抛错**（不能当成"没有"） */
+async function myHasThumbprint(thumb, run = pexec) {
+  if (!isWindows) return false
+  const ps = `Get-ChildItem Cert:\\CurrentUser\\My -ErrorAction Stop | ` +
+    `Where-Object { $_.Thumbprint -eq '${thumb}' } | ` +
+    `Select-Object -First 1 -ExpandProperty Thumbprint`
+  const { stdout } = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { windowsHide: true, env: psEnv() })
+  return stdout.trim().length > 0
 }
 
 /** 个人证书库里所有由本程序生成的证书（用于残留清理） */
@@ -505,7 +664,7 @@ export async function findMyLeftovers() {
   // 同 findResidualCa：读不到就必须失败，不能"读不到 = 没有残留"
   const ps = `Get-ChildItem Cert:\\CurrentUser\\My -ErrorAction Stop | ` +
     `Where-Object { $_.Subject -like '*${CA_SUBJECT_MARK}*' } | ` +
-    `ForEach-Object { "$($_.Thumbprint)|$($_.Subject)" }`
+    `ForEach-Object { "$($_.Thumbprint)|$($_.Subject)|$($_.NotBefore.ToString('s'))" }`
   // ⚠️ 这里**不吞异常**（原来是 `catch { return [] }`）。
   //    吞掉的后果和上面那条一样：读不到证书库被当成"没有残留"，
   //    于是上次异常退出留下的证书静默地留在用户机器上。
@@ -513,8 +672,8 @@ export async function findMyLeftovers() {
   const { stdout } = await pexec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
     { windowsHide: true, env: psEnv() })
   return stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => {
-    const [thumbprint, subject] = line.split('|')
-    return { thumbprint, subject }
+    const [thumbprint, subject, notBefore] = line.split('|')
+    return { thumbprint, subject, notBefore }
   })
 }
 
@@ -530,15 +689,29 @@ export async function myLeftoverCount() {
  *
  * @returns {Promise<{root:string[], my:string[], failed:string[]}>}
  */
-export async function cleanAllLeftovers() {
-  const root = await cleanResidual()
+export async function cleanAllLeftovers(opts = {}) {
+  const root = await cleanResidual(opts)
   const mine = await findMyLeftovers()
-  const removedMy = [], failed = [...root.failed.map((f) => `${f.thumbprint}: ${f.error}`)]
+  const nowMs = typeof opts.now === 'function' ? opts.now() : Number(opts.now ?? Date.now())
+  const olderThanMs = opts.olderThanMs ?? RESIDUAL_MIN_AGE_MS
+  const removedMy = [], kept = [...root.kept]
+  const failed = [...root.failed.map((f) => `${f.thumbprint}: ${f.error}`)]
   for (const c of mine) {
-    if (await removeFromMy(c.thumbprint)) removedMy.push(c.thumbprint)
-    else failed.push(`${c.thumbprint}: 无法从个人证书库删除`)
+    // P2-3 的同一判据：My 库里的旧版本遗留也不能在"另一个实例还在跑"时被删。
+    // 旧实现按 subject 无条件删，第二个实例会把第一个实例正在用的证书清掉。
+    const createdAt = Date.parse(c.notBefore) + CERT_CLOCK_SKEW_MS
+    if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < olderThanMs) {
+      kept.push(c.thumbprint)
+      continue
+    }
+    try {
+      if (await removeFromMy(c.thumbprint)) removedMy.push(c.thumbprint)
+      // 返回 false = 已经不存在（被别的实例清掉），不算失败
+    } catch (e) {
+      failed.push(`${c.thumbprint}: ${e?.message ?? e}`)
+    }
   }
-  return { root: root.removed, my: removedMy, failed }
+  return { root: root.removed, my: removedMy, failed, kept }
 }
 
 /**

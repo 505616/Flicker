@@ -9,7 +9,8 @@
  *   suite（suite/flicker1.js）     —— 只管密码学
  *
  * 一条重要设计：**认证是按端点分工的**（PROTOCOL.md §7.1.1）
- *   /api/session 只认一次性令牌（此时还没有会话密钥，无法认证别的）
+ *   /api/session 只认"真正打开过链接"的客户端 —— 页面加载换来的会话 cookie，
+ *                或完整的一次性令牌 k（P1-3；此时还没有会话密钥，无法用 SID 认证）
  *   /api/auth    无认证（它就是用来认证的）
  *   /api/manifest、/api/chunk 认会话 ID（SID）
  * 这个分工解决了一个"先有鸡还是先有蛋"的问题：SID 是握手的产物，
@@ -63,13 +64,16 @@ export class Session {
    *     · `receiver`（接收模式，手机往我们这儿传）：对端是发送端 → 验 `senderMac`、回 `receiverMac`
    *   两个方向分开算，是为了防"把对方发来的应答原样打回去"这种反射攻击。
    * @param {(evt:object)=>void} [o.onEvent] 事件回调（供 TTY / GUI 前端渲染）
+   * @param {(ms:number)=>Promise<void>} [o.sleep] 失败退避用的睡眠函数（测试里注入假时钟）
    */
-  constructor({ password, salt, verifier, encManifest, manifestIv, manifestTag, onEvent, role = 'sender' }) {
+  constructor({ password, salt, verifier, encManifest, manifestIv, manifestTag, onEvent, role = 'sender', sleep }) {
     if (role !== 'sender' && role !== 'receiver') {
       throw new Error(`Session 的 role 只能是 sender 或 receiver（收到 ${role}）`)
     }
     this.role = role
     this.onEvent = onEvent ?? (() => {})
+    // 退避等待可注入：测试不需要真的睡 1/2/4/8 秒，只要记录被要求等多久即可。
+    this._sleep = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
     this.phase = PHASE.WAITING
 
     // 一次性令牌：进 URL 的 ?k=，首次访问即作废
@@ -102,6 +106,11 @@ export class Session {
 
   /** 一次性令牌校验：首次通过后即作废 */
   consumeToken(token) {
+    // P3-2：destroy() 会把 this.token 置 null，旧代码接着读 this.token.length 会抛
+    // TypeError（500 INTERNAL）。销毁后的语义应当是"会话没了"→ 410 DESTROYED。
+    if (this.phase === PHASE.DESTROYED || this.token == null) {
+      throw new SessionError('会话已销毁', 'DESTROYED')
+    }
     if (this.tokenConsumed) {
       throw new SessionError('这个链接已经被使用过了（一次性链接只允许访问一次）', 'TOKEN_USED')
     }
@@ -161,6 +170,12 @@ export class Session {
    */
   startAuth() {
     this._guardAlive()
+    // P2-1：READY/DONE 之后不能再把状态打回 AUTH。
+    // 旧实现只 guard "活着"，于是一个未认证的局域网方可以反复 startAuth：
+    // 既把进行中的握手挑战换掉，也让已认证的合法 SID 立刻变成 NOT_AUTHED（DoS）。
+    if (this.phase === PHASE.READY || this.phase === PHASE.DONE) {
+      throw new SessionError('已经通过认证，不能再发起新的握手', 'ALREADY_AUTHED')
+    }
     this.challenge = newChallenge()
     this.phase = PHASE.AUTH
     /** 这一次握手实际用了哪套构造（握手完成后可读） */
@@ -183,6 +198,11 @@ export class Session {
    */
   finishAuth({ mac, challenge, macProfile }) {
     this._guardAlive()
+    // P2-1：只允许在 AUTH 阶段提交应答。成功后再拿同一份 {challenge,mac} 调一次，
+    // 绝不能换来第二个 SID（那等于"观察到握手应答的人可无密码接管会话"）。
+    if (this.phase !== PHASE.AUTH) {
+      throw new SessionError('当前不在认证阶段（不能重复提交）', 'NOT_AUTHED')
+    }
     if (!this.challenge) throw new SessionError('还没有发起认证', 'NO_CHALLENGE')
 
     // 防止接收端自己换一个挑战来试探
@@ -195,6 +215,10 @@ export class Session {
       this._fail('挑战不匹配（可能是重放尝试）')
       throw new SessionError('挑战不匹配', 'CHALLENGE_MISMATCH')
     }
+    // 挑战是**一次性**的：从这一刻起作废（不管后面 MAC 对错）。
+    // 否则成功之后同一份 {challenge,mac} 还能再换一个新 SID，也能拿同一挑战反复试 MAC。
+    const usedChallenge = this.challenge
+    this.challenge = null
 
     // 接收端回执的构造：必须是报价里的某一个；不认识的回执一律拒绝
     const echoed = typeof macProfile === 'string' ? macProfile : null
@@ -218,7 +242,7 @@ export class Session {
     //    两个方向分开算，防止把对方的应答原样打回去（反射）。
     const peerProves = this.role === 'receiver' ? senderMac : receiverMac
     const weProve = this.role === 'receiver' ? receiverMac : senderMac
-    const expected = peerProves(this.keys.auth, this.challenge, { profile })
+    const expected = peerProves(this.keys.auth, usedChallenge, { profile })
     let given
     try { given = Buffer.from(String(mac ?? ''), 'base64') } catch { given = Buffer.alloc(0) }
 
@@ -237,7 +261,7 @@ export class Session {
     this.onEvent({ type: 'authed', peer: this.peer })
     return {
       sid: this.sid,
-      mac: weProve(this.keys.auth, this.challenge, { profile }).toString('base64'),
+      mac: weProve(this.keys.auth, usedChallenge, { profile }).toString('base64'),
       macProfile: profile,
     }
   }
@@ -266,6 +290,22 @@ export class Session {
     this.onEvent({ type: 'destroy-reason', reason: '认证失败次数过多' })
     this.destroy()
     return true
+  }
+
+  /**
+   * 文档 §4.6 要求的失败退避：第 n 次失败后 delay = min(1000·2^(n-1), 8000) ms。
+   *
+   * 为什么放在"响应之前"：在线爆破的代价必须真的变成墙钟时间。旧实现失败立刻返回，
+   * 5 次上限之外再无摩擦。调用点在 server.js 的 /api/auth/finish（捕获后先等再抛）。
+   * sleep 可注入，测试只断言"被要求等多久"。
+   *
+   * @returns {Promise<number>} 实际等待的毫秒数（0 = 没有失败，不需要退避）
+   */
+  async applyFailureBackoff() {
+    if (this.failures <= 0) return 0
+    const ms = Math.min(1000 * 2 ** (this.failures - 1), 8000)
+    await this._sleep(ms)
+    return ms
   }
 
   /** 校验会话 ID（清单与分块端点用） */
@@ -321,7 +361,7 @@ export function errorBody(err) {
   const status = {
     TOKEN_USED: 410, TOKEN_INVALID: 403,
     BAD_PASSWORD: 401, CHALLENGE_MISMATCH: 401, TOO_MANY_FAILURES: 410,
-    NOT_AUTHED: 401, NO_SID: 401, BAD_SID: 401, NO_CHALLENGE: 400,
+    NOT_AUTHED: 401, NO_SID: 401, BAD_SID: 401, NO_CHALLENGE: 400, ALREADY_AUTHED: 409,
     DESTROYED: 410, NOT_FOUND: 404, RANGE: 416,
   }[code] ?? 500
   return { status, body: { error: code, message: err.message } }

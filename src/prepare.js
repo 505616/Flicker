@@ -32,8 +32,9 @@ import { SLOTS } from './plugin/events.js'
  * @returns {Promise<object>} 准备结果
  *
  * ⚠️ 关于 `chunkBytes`：线上格式**本来就与块大小无关** ——
- *    清单里逐文件带 `chunkBytes`，接收端按它分块；IV 只由块号派生
- *    （`chunkIV(chunkIndex)`），AAD 只绑 (文件下标, 块号, 总块数, 明文长度)。
+ *    清单里逐文件带 `chunkBytes`，接收端按它分块；IV 由 (文件下标, 块号) 共同派生
+ *    （`chunkIV(fileIndex, chunkIndex)`，P0-1：只用块号会让不同文件复用 GCM nonce），
+ *    AAD 只绑 (文件下标, 块号, 总块数, 明文长度)。
  *    所以换块大小不需要改协议。这里留一个显式入参，是为了能用**真实发送端**
  *    去量"块大小值多少"（`_lab/bench-recv-rtt.mjs`），而不是另写一个假发送端 ——
  *    假发送端测出来的东西不算数（见 `路线图.md` 里那条教训）。
@@ -152,6 +153,17 @@ export async function prepareSession({ inputs, password: givenPassword, gift, ui
     let g = 0
     wire.files.forEach((f, i) => { f.index = i; f.firstChunk = g; g += f.chunks })
     wire.totalChunks = g
+  }
+
+  // ── 阶段 4.8：完整性字段自检（P3-3）───────────────
+  //
+  // `sha256` 是完成判据里的**必填**字段：接收端若允许它缺失，就等于"跳过整文件校验直接定稿"。
+  // 发送端在加密前先自检一遍 —— 宁可现在报错，也不要发出一个"无法验证"的清单。
+  for (const f of wire.files) {
+    if (typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(f.sha256)) {
+      throw new Error(
+        `清单里的「${f.rel ?? f.name}」缺少有效的 sha256 —— 拒绝发送无法校验的文件`)
+    }
   }
 
   // ── 阶段 5：加密清单 ────────────────────────────────

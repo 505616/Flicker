@@ -12,8 +12,9 @@
  */
 import { createServer, request } from 'node:https'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { open } from 'node:fs/promises'
-import { sealChunk, chunkIV, PARAMS } from './suite/flicker1.js'
+import { sealChunk, PARAMS } from './suite/flicker1.js'
 import { Session, SessionError, errorBody, PHASE } from './session.js'
 
 /** 把接收端的 User-Agent 变成一句人话，显示在终端上 */
@@ -81,7 +82,16 @@ export class TransferServer {
     const maxChunk = Math.max(PARAMS.chunkBytes,
       ...(manifest?.files ?? []).map((f) => Number(f.chunkBytes) || 0))
     this._buf = Buffer.allocUnsafe(maxChunk)
+    // ⚠️ P0-2：`_buf` 是**实例级单例**，但每个请求都在自己的异步链上跑；
+    //    接收页默认 6 并发预取，旧代码让两个请求同时读/写同一块内存，
+    //    A 的 fill(0) 还会清掉 B 刚读到的数据（实测 6 并发里 4~6 块内容错误）。
+    //    用一条 Promise 链把"读盘 → 加密 → 清零"临界区串行化，
+    //    保证同一时刻只有一个请求接触共享缓冲（分配仍然只有一次，见 large-file.test.js）。
+    this._bufLock = Promise.resolve()
     this._closing = false
+    // 会话级 cookie（P1-3）：页面加载成功后用它换掉 URL 里的 ?k=，
+    // 之后 /api/session 与 /api/auth/start 只认它（或完整的一次性令牌）。
+    this._sessionCookie = null
   }
 
   /**
@@ -248,24 +258,32 @@ export class TransferServer {
     if (p === '/' || p === '/index.html') {
       this.session.consumeToken(token)
       this.session.notePeer(req)
-      res.writeHead(200, { ...sec, 'Content-Type': MIME['.html'] })
+      // P1-3：把一次性令牌换成**会话级 HttpOnly cookie**。
+      // 之前 /api/session 只看"令牌被消费过没有"，于是页面一打开，同网段任何主机
+      // 都能拿到 PBKDF2 盐 + 加密清单，在本地离线爆破密码（绕过 5 次上限）。
+      // 现在页面之后的请求由浏览器自动带上这个 cookie；拿不到链接的人没有它。
+      this._sessionCookie = randomBytes(32).toString('base64url')
+      const setCookie = [
+        `flicker_session=${this._sessionCookie}`,
+        'Path=/', 'HttpOnly', 'SameSite=Strict',
+        // 明文 HTTP 分支只用于测试；生产路径是 HTTPS，必须加 Secure
+        ...(this.secure ? ['Secure'] : []),
+      ].join('; ')
+      res.writeHead(200, { ...sec, 'Content-Type': MIME['.html'], 'Set-Cookie': setCookie })
       res.end(this.receiverHtml)
       return
     }
 
-    // ② 会话参数（令牌认证）
+    // ② 会话参数（只给真正打开过链接的客户端 —— P1-3）
     if (p === '/api/session') {
-      if (!this.session.tokenConsumed) {
-        // 允许在已消费令牌的同一会话内再次询问（比如页面刷新前）
-        throw new SessionError('需要先打开接收页面', 'TOKEN_INVALID')
-      }
+      this._requireSessionAccess(req, url)
       this._json(res, sec, 200, this.session.sessionInfo())
       return
     }
 
-    // ③ 发起认证（无认证 —— 它就是用来认证的）
+    // ③ 发起认证（无认证 —— 它就是用来认证的；但同样只认打开过页面的客户端）
     if (p === '/api/auth/start') {
-      if (!this.session.tokenConsumed) throw new SessionError('需要先打开接收页面', 'TOKEN_INVALID')
+      this._requireSessionAccess(req, url)
       this._json(res, sec, 200, this.session.startAuth())
       return
     }
@@ -275,9 +293,18 @@ export class TransferServer {
       const body = await this._readJson(req)
       // `macProfile` 是接收端**回执**它用了哪套 MAC 构造（降级保护，见 session.js）。
       // 可选字段：老页面不传 → 按 v1 处理并记下来供上层告警。
-      this._json(res, sec, 200, this.session.finishAuth({
-        mac: body.mac, challenge: body.challenge, macProfile: body.macProfile,
-      }))
+      let out
+      try {
+        out = this.session.finishAuth({
+          mac: body.mac, challenge: body.challenge, macProfile: body.macProfile,
+        })
+      } catch (e) {
+        // 文档 §4.6：每次失败必须延迟 1/2/4/8s 再回应 —— 让在线爆破付出真实的时间代价。
+        // 延迟放在抛出之前（响应还没发）；sleep 可注入，见 Session 的 applyFailureBackoff。
+        await this.session.applyFailureBackoff()
+        throw e
+      }
+      this._json(res, sec, 200, out)
       return
     }
 
@@ -313,6 +340,63 @@ export class TransferServer {
     res.end(buf)
   }
 
+  /** 从 Cookie 头里取一个值（只取第一个同名项） */
+  _cookieValue(req, name) {
+    const raw = req.headers?.cookie
+    if (typeof raw !== 'string') return null
+    for (const part of raw.split(';')) {
+      const eq = part.indexOf('=')
+      if (eq < 0) continue
+      if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim()
+    }
+    return null
+  }
+
+  /**
+   * P1-3 门禁：只有"真正打开过一次性链接"的客户端才能拿会话参数 / 发起认证。
+   *
+   * 两条等价的能力凭证，都要做常数时间比较：
+   *   ① 页面加载时种下的 `flicker_session` cookie —— 浏览器路径，HttpOnly 防脚本读；
+   *   ② URL 里的完整 `?k=` 一次性令牌 —— `flicker recv` 那条程序路径没有 cookie jar，
+   *      它手里的令牌就是报告建议的最小修复里要核对的那个秘密（PROTOCOL §7.1.1）。
+   *
+   * ⚠️ 判据**必须真的比对**。旧实现只检查 `session.tokenConsumed`，等于"页面打开后
+   *    同网段任何人都能拿到盐与清单密文"，可以离线爆破密码，绕过在线 5 次上限。
+   */
+  _requireSessionAccess(req, url) {
+    if (!this.session.tokenConsumed) {
+      throw new SessionError('需要先打开接收页面', 'TOKEN_INVALID')
+    }
+    const cookie = this._cookieValue(req, 'flicker_session')
+    if (cookie && this._sessionCookie) {
+      const a = Buffer.from(cookie), b = Buffer.from(this._sessionCookie)
+      if (a.length === b.length && timingSafeEqual(a, b)) return
+    }
+    const k = url.searchParams.get('k')
+    const token = this.session.token
+    if (typeof k === 'string' && typeof token === 'string' && k.length === token.length) {
+      if (timingSafeEqual(Buffer.from(k), Buffer.from(token))) return
+    }
+    throw new SessionError(
+      '需要先打开接收页面（只认页面种下的会话 cookie 或完整的一次性令牌）', 'TOKEN_INVALID')
+  }
+
+  /**
+   * 独占分块缓冲（P0-2）。
+   * 用一条 Promise 链把调用串起来：上一个 fn 结束（无论成功失败）才轮到下一个。
+   */
+  async _withBufLock(fn) {
+    const prev = this._bufLock
+    let release
+    this._bufLock = new Promise((resolve) => { release = resolve })
+    await prev
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+
   async _readJson(req) {
     const chunks = []
     let total = 0
@@ -340,59 +424,62 @@ export class TransferServer {
     const { file, chunkIndex, plainLen } = this._locate(seq)
 
     // 内容来源有两种：磁盘文件，或内存缓冲（源码形态的赠品包）
-    let plain
-    let release = () => {}
+    let ct, tag
     if (file._bytes) {
-      plain = file._bytes.subarray(chunkIndex * file.chunkBytes,
+      const plain = file._bytes.subarray(chunkIndex * file.chunkBytes,
         Math.min((chunkIndex + 1) * file.chunkBytes, file._bytes.length))
       if (plain.length !== plainLen) {
         throw new SessionError(`赠品包第 ${chunkIndex} 块长度不符`, 'INTERNAL')
       }
+      ;({ ct, tag } = sealChunk(this.session.keys.enc, file.index, chunkIndex, file.chunks, plain))
     } else {
       const fh = await open(file.absPath, 'r')
       try {
-        const { bytesRead } = await fh.read(this._buf, 0, file.chunkBytes, chunkIndex * file.chunkBytes)
-        if (bytesRead !== plainLen) {
-          throw new SessionError(
-            `文件在传输过程中被改动（${file.rel} 第 ${chunkIndex} 块：` +
-            `期望 ${plainLen} 字节，实读 ${bytesRead}）`, 'INTERNAL')
-        }
-      } catch (e) { await fh.close(); throw e }
-      release = () => fh.close()
+        // ⚠️ P0-2：`this._buf` 是实例级单例，而接收页默认 6 并发预取。
+        //    旧代码在锁外做 "读盘 → 加密 → 清零"：两个请求会同时写同一块内存，
+        //    A 的 fill(0) 还会清掉 B 刚读到的数据（已复现：6 并发里 4/6 块内容错误）。
+        //    这里把这一整段放进独占临界区；sealChunk 的产物 ct 是独立 Buffer，
+        //    离开临界区后可以并发发送，不影响吞吐。
+        ;({ ct, tag } = await this._withBufLock(async () => {
+          const { bytesRead } = await fh.read(this._buf, 0, file.chunkBytes, chunkIndex * file.chunkBytes)
+          if (bytesRead !== plainLen) {
+            throw new SessionError(
+              `文件在传输过程中被改动（${file.rel} 第 ${chunkIndex} 块：` +
+              `期望 ${plainLen} 字节，实读 ${bytesRead}）`, 'INTERNAL')
+          }
+          const src = this._buf.subarray(0, plainLen)
+          try {
+            // 限速：在**加密之前**等。判据用 _closing（服务正在关闭 = 这次传输已经没意义了），
+            // 免得关闭时还傻等一段限速。它仍在临界区内：共享缓冲要等清零后才能给下一个请求用。
+            if (this.limiter) await this.limiter.take(plainLen, () => this._closing)
+            return sealChunk(this.session.keys.enc, file.index, chunkIndex, file.chunks, src)
+          } finally {
+            // 明文缓冲用后立即清零 —— 发送端不保留任何明文副本
+            src.fill(0)
+          }
+        }))
+      } finally {
+        await fh.close()
+      }
     }
 
-    try {
-      const src = file._bytes ? plain : this._buf.subarray(0, plainLen)
+    res.writeHead(200, {
+      ...sec,
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': ct.length,
+      'X-Flicker-Tag': tag.toString('base64'),
+      'X-Flicker-File': String(file.index),
+      'X-Flicker-Chunk': String(chunkIndex),
+    })
+    res.end(ct)
 
-      // 限速：在**加密之前**等，等的时候不占着明文缓冲。
-      // 判据用 _closing（服务正在关闭 = 这次传输已经没意义了），
-      // 免得关闭时还傻等一段限速。
-      if (this.limiter) await this.limiter.take(plainLen, () => this._closing)
-
-      const { ct, tag } = sealChunk(this.session.keys.enc, file.index, chunkIndex, file.chunks, src)
-
-      res.writeHead(200, {
-        ...sec,
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': ct.length,
-        'X-Flicker-Tag': tag.toString('base64'),
-        'X-Flicker-File': String(file.index),
-        'X-Flicker-Chunk': String(chunkIndex),
-      })
-      res.end(ct)
-
-      this.session.recordSent(plainLen)
-      this.onEvent({
-        type: 'chunk',
-        seq, fileIndex: file.index, fileName: file.rel, fileCount: this.manifest.files.length,
-        bytes: plainLen, totalBytes: this.manifest.totalBytes,
-        sentBytes: this.session.bytesSent,
-      })
-      // 明文缓冲用后立即清零 —— 发送端不保留任何明文副本
-      if (!file._bytes) this._buf.subarray(0, plainLen).fill(0)
-    } finally {
-      await release()
-    }
+    this.session.recordSent(plainLen)
+    this.onEvent({
+      type: 'chunk',
+      seq, fileIndex: file.index, fileName: file.rel, fileCount: this.manifest.files.length,
+      bytes: plainLen, totalBytes: this.manifest.totalBytes,
+      sentBytes: this.session.bytesSent,
+    })
   }
 
   /** 全局块序号 → (文件, 文件内块号, 明文长度) */
@@ -417,7 +504,9 @@ export class TransferServer {
   async shutdown() {
     if (this._closing) return
     this._closing = true
-    this._buf?.fill(0)
+    // ⚠️ P0-2：共享缓冲可能还有在途请求在用（6 并发预取）。必须等持锁者退出临界区
+    //    之后再清零，否则会在加密中途把明文抹掉 —— 那是"并发返回错块"的另一个来源。
+    await this._withBufLock(async () => { this._buf?.fill(0) })
     const srv = this.server
     if (!srv) return
     await new Promise((resolve) => {

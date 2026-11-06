@@ -101,7 +101,7 @@
 | **会话 / Session** | 从密码确认到销毁的完整生命周期，由 `SID`（16 字节）标识 |
 | **房间 / Room** | relay 上的一个消息信箱，由 `room_name` 标识，有 TTL |
 | **V** | 密码验证值（password verifier），由套件的 PDF 产生，**永不上网线** |
-| **SID** | 会话 ID，`SHA-256(nonce_r ‖ nonce_i)` 的前 16 字节 |
+| **SID** | 会话 ID，握手成功后由接收端生成的 16 字节随机数（线上是 base64url） |
 | **gift** | manifest 中标记为「程序」的条目，用于把接收端程序本身送给对方 |
 
 ---
@@ -167,9 +167,9 @@ suite_id := "FLICKER/" 1*DIGIT
 | | salt | **空**（空字节串，不是省略） |
 | | IKM | `V`（32 字节） |
 | | 输出长度 | `32` 字节 |
-| | label `room` | `K_room = HKDF(V, "room")` |
-| | label `auth` | `K_auth = HKDF(V, "auth")` |
-| | label `enc` | `K_enc  = HKDF(V, "enc")` |
+| | label `room` | `K_room = HKDF(V, "flicker/1/room")` |
+| | label `auth` | `K_auth = HKDF(V, "flicker/1/auth")` |
+| | label `enc` | `K_enc  = HKDF(V, "flicker/1/enc")` |
 | **AEAD** | 算法 | `AES-256-GCM` |
 | | 密钥 | `K_enc`（32 字节，即 AES-256） |
 | | IV 长度 | `12` 字节 |
@@ -177,21 +177,23 @@ suite_id := "FLICKER/" 1*DIGIT
 | | 分块明文长度 | `1048576` 字节（1 MiB） |
 | **完整性** | 哈希 | `SHA-256` |
 | | 用途 | 文件级校验（`files[].sha256`）、分块级逐块指纹（`files[].chunkHashes`） |
-| **会话 ID** | `SID` | `SHA-256(nonce_r ‖ nonce_i)` 的前 `16` 字节 |
+| **会话 ID** | `SID` | `16` 字节随机数，握手成功后由接收端生成，以 **base64url**（22 个字符）传输 |
 
 > **待验证**：`PBKDF2` 迭代 600000 在低端手机浏览器上的耗时。若超过 2 秒，需要在 UI 上给出明确等待提示，而不是降低迭代次数。（候选实测目标：Android 中端机 Chrome）
 
 #### 2.4.1 `label` 的精确定义（防止实现分歧）
 
 ```
-label "room"  := 字节序列 72 6F 6F 6D        （ASCII "room"，4 字节）
-label "auth"  := 字节序列 61 75 74 68        （ASCII "auth"，4 字节）
-label "enc"   := 字节序列 65 6E 63           （ASCII "enc"，3 字节）
+label "room"  := 字节序列 66 6C 69 63 6B 65 72 2F 31 2F 72 6F 6F 6D   （ASCII "flicker/1/room"，14 字节）
+label "auth"  := 字节序列 66 6C 69 63 6B 65 72 2F 31 2F 61 75 74 68   （ASCII "flicker/1/auth"，14 字节）
+label "enc"   := 字节序列 66 6C 69 63 6B 65 72 2F 31 2F 65 6E 63      （ASCII "flicker/1/enc"，13 字节）
 
-K_room = HKDF-Expand(HKDF-Extract(salt = "", IKM = V), info = "room", L = 32)
+K_room = HKDF-Expand(HKDF-Extract(salt = "", IKM = V), info = "flicker/1/room", L = 32)
 ```
 
-**注意**：HKDF 的 `salt` 为**空**，而 `info` 为上述 label。不要把 label 放进 salt，不要把盐 `S` 放进 HKDF —— `S` 已经通过 PDF 影响 `V`，重复注入没有额外收益但会造成实现分歧。
+**注意**：HKDF 的 `salt` 为**空**，而 `info` 为上述**完整的域分隔串**。不要把 label 放进 salt，不要把盐 `S` 放进 HKDF —— `S` 已经通过 PDF 影响 `V`，重复注入没有额外收益但会造成实现分歧。
+
+> ⚠️ **这是线格式的值，不是命名风格（2026-11 更正）**：实现里用的若是裸词 `"room"`/`"auth"`/`"enc"`，派生的 `K_room` 就不同 → `room_name` 不同 → 两端根本进不了同一个中继房间；`K_auth`/`K_enc` 同理，握手 MAC 与每个块的认证标签都会失败。实现一直用的是完整字符串（`src/suite/flicker1.js` 的 `LABELS`）；0.1.0 文档写成裸词是**文档错了**。
 
 #### 2.4.2 `room_name` 的定义
 
@@ -616,9 +618,18 @@ GET    /health               健康检查 + **能力声明**（无副作用，�
 ```
 
 房间号 `:room` = **64 位十六进制**（128 bit），由密码经 HKDF 派生
-（`HKDF(V, "flicker/1/room")`）。它只出现在链接的 `#` 之后，
-**浏览器不会把 fragment 发给服务器**。知道房间名 ≡ 知道密码，
-所以中继不需要第二套授权机制（早先的"授权密钥登记"方案有个先到先得的竞态，已废弃）。
+（`HKDF(V, "flicker/1/room")`）。它只出现在链接的 `#` 之后，所以首次页面加载不会把它写进中继的访问日志；
+但页面 JavaScript 之后会用它在 `/r/:room` 的 API 路径里，所以**中继确实会知道房间名**（这是预期内的 —— 它不是秘密）。
+
+**房间名"意味着什么、不意味着什么"（2026-11 更正）**：
+
+| 说法 | 真相 |
+|---|---|
+| "知道房间名 ≡ 知道密码" | **在机密性意义上不成立。** 房间名是单向派生的，反推不出 `K_enc`，所以它不能让任何人解开内容；它只是"能参与这个信箱"的凭据 |
+| "房间不可被抢占" | **不成立。** 房间名就在链接里，拿到链接（但没有密码）的人可以抢先建房间。中继是先到先得的；真正的发送端到达时看到房间非空，会以 `ROOM_TAKEN` 中止。这是**拒绝服务**问题，不是机密性问题：抢占者依然读不到、也伪造不了任何内容 |
+| "中继不需要第二套授权机制" | **这是设计，且成立。** 没有逐房间的授权密钥，128 bit 房间名本身就是能力凭据。代价就是上面那条可用性提醒 —— 链接与密码请分开传 |
+
+> 实用规则：链接只给要传的人，密码走另一个渠道告诉他。链接泄露不会泄露内容，但能被拿去占住房间、让传输失败。
 
 ### 3R.3 消息格式
 
@@ -628,6 +639,23 @@ GET    /health               健康检查 + **能力声明**（无副作用，�
 0x01 + salt(16) + iv(12) + tag(16) + 密文     清单（salt 与加密清单一起放）
 0x02 + tag(16) + 密文                          一个文件分块
 ```
+
+**清单分帧（2026-11，修掉"一条 2.59 MB 消息"的确定性失败）**
+
+约一万个单块小文件的清单约 2.59 MB，超过中继的单条消息上限，于是"发文件夹"在中继模式下必然 `413`。
+所以清单拆成 `partCount` 条消息：
+
+```
+M         = 上面那条完整的 0x01 消息（类型字节 + salt + iv + tag + 密文）
+partSize  = maxMessageBytes - 8
+partCount = max(1, ceil(M.length / partSize))       且 partCount <= 1024
+第 i 条     = BE32(i) || BE32(partCount) || M.slice(i*partSize, (i+1)*partSize)   存在 seq i，0 <= i < partCount
+数据块 g   = 存在 seq partCount + g                  ack 的 upTo = partCount + 1 + g   （g 从 0 开始）
+```
+
+**每份清单都分帧**，哪怕很小：`partCount = 1` 时也照样带 8 字节头，这样接收端只有一种格式要处理。
+接收端读 seq 0 的头、校验 `1 <= partCount <= 1024`，再取 seq `1 .. partCount-1` 并逐条校验 `(index, partCount)`；
+它不需要知道 `maxMessageBytes`。需要超过 1024 条的清单会被拒绝：`413 MANIFEST_TOO_LARGE`。
 
 `/batch` 的请求体是若干条消息按顺序拼接，每条前加 **4 字节大端长度**：
 
@@ -668,8 +696,8 @@ GET    /health               健康检查 + **能力声明**（无副作用，�
 ### 3R.4 投递模型：拉取式 + 在途窗口
 
 ```
-seq 0        清单 —— 房间建立时放入
-seq 1..N     分块 —— 按窗口投递，默认窗口 8
+seq 0                 .. seq partCount-1   分帧的清单 —— 房间建立时放入
+seq partCount         .. seq partCount+N-1 分块 —— 按窗口投递，默认窗口 8
 ```
 
 **为什么"一批一次 POST"而不是"并发发 N 条 `?seq=N`"**：
@@ -725,15 +753,20 @@ Durable Objects —— 有人加持久化设施就会失败，提醒他重新审
     V = suite.pdf(P, S)                       // FLICKER/1: PBKDF2-SHA256, 600000 轮, 32 字节
 
 阶段 2（廉价，从 V 派生三把互不相关的钥匙）：
-    K_room = suite.kdf(V, "room")             // 房间名，永不当密钥用于加密
-    K_auth = suite.kdf(V, "auth")             // 握手 MAC
-    K_enc  = suite.kdf(V, "enc")              // 文件加密（作为 K_job 的输入）
-
-    // 会话级密钥（握手完成后，见 §4.5）
-    K_job  = HKDF-Expand(HKDF-Extract(salt = "", IKM = K_enc), info = SID, L = 32)
+    K_room = suite.kdf(V, "flicker/1/room")   // 房间名，永不当密钥用于加密
+    K_auth = suite.kdf(V, "flicker/1/auth")   // 握手 MAC
+    K_enc  = suite.kdf(V, "flicker/1/enc")    // 文件加密：**直接**用作 AES-256-GCM 的 key
 ```
 
-**为什么有 `K_job`**：`K_enc` 由密码派生，因此**同一对密码 + 同一 `S`**（几乎不会发生，但理论上可能被强制构造）会得到同一把密钥。把 `SID` 绑进 `K_job` 确保**每个会话的加密密钥唯一**，彻底排除跨会话重放。`K_job` 是实际用于分块加密的密钥；`K_enc` 只作为它的输入。
+**为什么没有 `K_job`（2026-11 更正）**：实现只有这三把钥匙，分块 AEAD 与清单 AEAD 都**直接用 `K_enc`**（见 §4.5）。原设计在这里多一层 `K_job = HKDF(K_enc, SID)`，目的是"每个会话一把独立加密密钥"，但它是多余的：
+
+| 要求 | 实际由什么保证 |
+|---|---|
+| 不同会话必须用不同的加密密钥 | **盐 `S`** 每个会话随机 16 字节，`V = PBKDF2(P, S)`；`S` 不同 ⇒ `V` 不同 ⇒ `K_enc` 不同。两个会话撞盐的概率是 2⁻¹²⁸ |
+| 同一会话内，同一把 key 下的 IV 绝不重复 | 分块 IV 由 `(fileIndex, chunkIndex)` 确定性派生、一一对应（§5.3）；清单 IV 是随清单下发的随机 12 字节。会话内所有文件的全部块都覆盖到了 |
+| `SID` 必须不可预测且唯一 | `SID` 是接收端生成的 16 字节随机数（§4.5）。它是**标识**，不是密钥派生输入 |
+
+> 照 0.1.0 文档实现客户端会派生 `K_job` 并用它加密每个块 —— 认证标签永远对不上。可用客户端的做法是：只派生三把钥匙，直接用 `K_enc`。
 
 **为什么只有三把钥匙（一条被否决的设计）**：曾考虑额外派生一把 `K_aux = kdf(V, "aux")` 作为"预留给未来 SAS 用途"的第四把钥匙。**该设计被否决**，原因是一个死锁：
 
@@ -763,8 +796,8 @@ Durable Objects —— 有人加持久化设施就会失败，提醒他重新审
         │                                    │                                │  生成 nonce_r(32B 随机)
         │                                    │                                │
         │                                    │   mac_r = HMAC(K_auth,         │
-        │                                    │       "flk1-recv" ‖ suite_id   │
-        │                                    │       ‖ "recv" ‖ nonce_r)      │
+        │                                    │       "FLICKER/1\nrecv\n"      │
+        │                                    │       ‖ nonce_r)               │
         │                                    │                                │
         │                                    │<──── POST ─────────────────────│ AUTH_REQ{suite,nonce_r,mac_r}
         │<── GET 长轮询 ──────────────────────│                                │
@@ -772,17 +805,16 @@ Durable Objects —— 有人加持久化设施就会失败，提醒他重新审
         │  [阶段 2] 用 **本地 V** 重算 K_auth                                  │
         │           重算 mac_r 并 **常数时间比较**                              │
         │           不符 → 失败计数 +1，发 ERROR(E_MAC_MISMATCH)               │
-        │           相符 → 生成 nonce_i(32B 随机)                              │
-        │            SID = SHA-256(nonce_r ‖ nonce_i)[0..16)                  │
-        │            K_job = HKDF(K_enc, SID)                                 │
+        │           相符 → 生成 SID = randomBytes(16) → base64url                │
+        │            （没有 K_job：K_enc 就是 AES 的 key）                      │
         │                                                                    │
-        │           mac_i = HMAC(K_auth, "flk1-send" ‖ suite_id ‖ "send" ‖ nonce_i ‖ SID)
+        │           mac_i = HMAC(K_auth, "FLICKER/1\nsend\n" ‖ nonce_i)        │
         │                                    │                                │
-        │── POST ───────────────────────────>│  AUTH_OK{nonce_i,sid,mac_i}    │
+        │── POST ───────────────────────────>│  AUTH_OK{nonce_i,sid,mac_i,macProfile} │
         │                                    │───────────────────────────────>│
         │                                    │                                │
         │                                    │  [阶段 3] 校验 mac_i（常数时间）
-        │                                    │           算 SID、K_job
+        │                                    │           记下 SID（随机，由发起方传来）
         │                                    │           失败 → ERROR(E_MAC_MISMATCH)
         │                                    │
         │── POST ───────────────────────────>│  ENDPOINT{urls,expires_in}     │
@@ -800,51 +832,36 @@ Durable Objects —— 有人加持久化设施就会失败，提醒他重新审
 #### 4.3.1 MAC 的精确定义（逐字节）
 
 ```
-MAC_RECV_DOMAIN = "flk1-recv"     // ASCII, 9 字节: 66 6C 6B 31 2D 72 65 63 76
-MAC_SEND_DOMAIN = "flk1-send"     // ASCII, 9 字节
-ROLE_RECV       = "recv"          // ASCII, 4 字节
-ROLE_SEND       = "send"          // ASCII, 4 字节
+# v2（默认）：协商出的套件 id 进入被认证的材料
+prefix_recv_v2 = utf8("FLICKER/1\nrecv\n")
+prefix_send_v2 = utf8("FLICKER/1\nsend\n")
 
-mac_r = HMAC-SHA-256(
-          key  = K_auth,
-          data = MAC_RECV_DOMAIN ‖ suite_id_ascii ‖ ROLE_RECV ‖ nonce_r
-        )
+# v1（0.1.0 兼容）：0.1.0 发布时的字节
+prefix_recv_v1 = utf8("flicker/1/recv\n")
+prefix_send_v1 = utf8("flicker/1/send\n")
 
-mac_i = HMAC-SHA-256(
-          key  = K_auth,
-          data = MAC_SEND_DOMAIN ‖ suite_id_ascii ‖ ROLE_SEND ‖ nonce_i ‖ SID
-        )
+mac_r = HMAC-SHA-256(key = K_auth, data = prefix_recv_<profile> ‖ nonce_r)
+mac_i = HMAC-SHA-256(key = K_auth, data = prefix_send_<profile> ‖ nonce_i)
 ```
 
 | 组成 | 为什么必须有 |
 |---|---|
-| `MAC_*_DOMAIN` | **域分隔**。防止把 recv 方向的 MAC 重放到 send 方向（没有它，两个方向的 MAC 输入结构相同，只是 nonce 不同，会留下可乘之机） |
-| `suite_id` | 绑定协商结果 → 使 §2.6 的降级攻击可被检测 |
-| `ROLE_*` | 角色绑定。防止双向反射攻击 |
+| v2 前缀里的 `suite_id` | **降级绑定**：中间人把 `HELLO.suites` 剪到只剩弱套件时，两端选出的套件不同 → MAC 输入不同 → 校验失败（§2.6） |
+| 结尾的 `"\n"` 与角色词 | **域分隔 + 角色绑定**：recv 方向的 MAC 永远无法被重放到 send 方向 |
 | `nonce_r` / `nonce_i` | 新鲜性。每次会话随机 → 抗重放 |
-| `SID`（仅 `mac_i`） | 让发起方对"本次会话的最终标识"作出承诺。接收方在收到 `mac_i` 前就已经能算出 `SID`，因此可以校验 |
+| `macProfile`（回执在 MAC **之外**） | 降级哨兵：接收端如实回执自己用了哪套构造；"我报了 v2、你回执 v1" → 中止 `E_DOWNGRADE`（§4.5.1） |
+| `SID` | **刻意不进 MAC**。`SID` 是接收端生成的 `randomBytes(16)`，不由 nonce 派生；跨会话绑定靠每会话随机的盐（§4.2） |
+| 常数时间比较 | 会短路的比较会泄露"前多少个字节对上了"；实现用 `timingSafeEqual` |
 
 > **`nonce_i` 只出现在 `mac_i` 中，`nonce_i` 本身随 `AUTH_OK` 明文发送。** 这是安全的：`nonce_i` 不是秘密，它的作用是新鲜性。安全性来自 `K_auth`，而 `K_auth` 永不上线。
 
-> ### ✅ 与实现的差异已处理（2026-10，见 §4.5.1）
+> ### ⚠️ 相对 0.1.0 文档改了什么（2026-11 更正）
 >
-> 上面那段是**设计意图**。实现从 2026-10 起用**两种具名构造**，细节与取舍见 §4.5.1：
->
-> ```
-> v2（默认，绑套件）：mac_r = HMAC(K_auth, "FLICKER/1\nrecv\n" ‖ nonce_r)
->                     mac_i = HMAC(K_auth, "FLICKER/1\nsend\n" ‖ nonce_i)
-> v1（兼容旧对端）：  mac_r = HMAC(K_auth, "flicker/1/recv\n" ‖ nonce_r)
->                     mac_i = HMAC(K_auth, "flicker/1/send\n" ‖ nonce_i)
-> ```
->
-> **第三方实现者请注意**：新对端请实现 v2；**只实现 v1 也能与老版本互通**，
-> 但拿不到 §2.6 的降级保护（v2 才是"协商结果进 MAC"那条判据的落点）。
->
-> 仍与本节第一段不同的是另外两处：`MAC_*_DOMAIN` 的字面值（`flk1-recv` / `flk1-send`），
-> 以及 `mac_i` 里是否拼 `SID`。那是**尚未决定的协议演进**，不是笔误 ——
-> 把 `SID` 拼进 MAC 需要先把 `SID` 改成可推导的（当前它是认证后随机生成的），牵动面更大。
-> 在决定之前，**文档与实现的差异写在明面上** ——
-> 让人照着文档实现然后连不上，比文档写得难看严重得多。
+> 0.1.0 文档写的是**单套构造**：`MAC_RECV_DOMAIN = "flk1-recv"`、中间拼裸 `suite_id`、
+> 再来一个角色词、`mac_i` 末尾拼 `SID`。实现**这些都没有**，照旧文档写的客户端连不上。
+> 真实字节就是上面两种前缀（`src/suite/flicker1.js` 的 `macInput()`）：`suite_id` 折进 v2 前缀
+> 而不是单独一段；降级哨兵靠 `macProfile` 回执；`SID` 不进 MAC。
+> v2/v1 的选择流程见下面的 §4.5.1。
 
 > #### 4.5.1 握手 MAC 的两种构造与降级保护（2026-10 实现）
 >
@@ -951,16 +968,18 @@ https://<relay>/#k=<房间名 64 hex>&s=<盐 32 hex>
 ### 4.5 会话 ID 与子密钥的最终定义
 
 ```
-SID   = SHA-256(nonce_r ‖ nonce_i)[0 .. 16)          // 前 16 字节
-K_job = HKDF-SHA-256(salt = "", IKM = K_enc, info = SID, L = 32)
+SID = randomBytes(16)                                  // 接收端生成；线上是 base64url（22 字符）
+K   = K_enc = HKDF-Expand(HKDF-Extract(salt = "", IKM = V), info = "flicker/1/enc", L = 32)
 ```
 
 | 量 | 长度 | 用途 |
 |---|---|---|
-| `SID` | 16 字节 | 会话标识；进入每个块的 AAD；进入 manifest |
-| `K_job` | 32 字节 | **实际的分块加密密钥**（AES-256-GCM 的 key） |
+| `SID` | 16 字节随机数（线上 base64url 22 字符） | 会话标识；客户端用 `?sid=` 回传，清单里也重复一份。**不**参与任何密钥派生 |
+| `K_enc` | 32 字节 | **实际的 AES-256-GCM 密钥**，分块与清单都用它 |
 
-**销毁要求**：`V`、`K_auth`、`K_enc`、`K_job`、`nonce_r`、`nonce_i` 全部在会话结束时 `fill(0)` 覆写（见 `设计文档.md` 第六章）。
+**为什么清单里的 `sid` 校验仍然成立**：清单把 `SID` 当作明文字段放在加密 JSON 里，接收端拿握手得到的 `SID` 与它比（不符 → `E_SID_MISMATCH`）。那是**一致性校验**，不是把 `SID` 绑进密钥 —— 它挡的是"中继拿另一个会话的清单来替换"，不需要 `SID` 参与 KDF。
+
+**销毁要求**：`V`、`K_auth`、`K_enc`、`nonce_r`、`nonce_i` 全部在会话结束时 `fill(0)` 覆写（见 `设计文档.md` 第六章）。
 
 ### 4.6 失败处理
 
@@ -1045,114 +1064,135 @@ delay_ms = min(1000 * 2^(failCount-1), 8000)
 ### 5.1 `seq` 的定义（64 bit 单一整数）
 
 ```c
-seq = (fileIndex << 16) | chunkIndex      // 大端 BE64 编码后传输
+seq = file.firstChunk + chunkIndex
 ```
 
-| 位域 | 宽度 | 范围 | 含义 |
-|---|---|---|---|
-| 高 48 bit | 48 | `0 .. 281474976710655` | `fileIndex`：文件在 manifest 中的序号（从 0 开始） |
-| 低 16 bit | 16 | `0 .. 65535` | `chunkIndex`：文件内的块序号（从 0 开始） |
+`file.firstChunk` 是该文件之前所有文件的块数之和，它本身就是 manifest 里的字段。
 
-**由低 16 bit 推出两条硬性上限**：
+| 量 | 定义 |
+|---|---|
+| `fileIndex` | 文件在 manifest 中的序号（从 0 开始） |
+| `chunkIndex` | 文件内的块序号（从 0 开始） |
+| `firstChunk` | 前面的文件一共占了多少块 |
+| `seq` | 这一块在**整个会话**里的全局序号（`0 .. totalChunks-1`） |
+
+**没有位打包（2026-11 更正）**：0.1.0 文档定义 `seq = (fileIndex << 16) | chunkIndex` 并说按 BE64 序列化，实现从来没这么做：
+`seq` 就是一个普通 JS `Number`（累计块序号），直连模式下以十进制 `?seq=` 传输，中继模式下用房间的消息序号
+（还要加上清单分帧的偏移，见下）。照位打包写的客户端会取错块。
 
 | 上限 | 值 | 后果 |
 |---|---|---|
-| 单文件最大块数 | `65536` | 超过则 `E_FILE_TOO_LARGE` |
-| 单文件最大字节数 | `65536 × 1 MiB = 64 GiB` | 同上 |
-| 单次会话最大文件数 | `2^48`（理论） | 实际由 manifest 大小与内存限制约束 |
+| `seq` 必须是安全整数 | ≤ 2⁵³−1 | 超过按越界拒绝 |
+| 单文件块数 | `ceil(size / chunkBytes)`；空文件也算 1 块 | **不再有** 16 bit 的单文件上限；实际只受文件大小约束 |
+| 单次会话文件数 | 无固定上限 | 由 manifest 大小与内存约束 |
 
-> 一个 64 GiB 的单文件上限对本项目定位（几百 MB 到几十 GB）是足够的。若将来要突破，方案是**新增套件**（`chunkSize` 是套件成员）或新增 `seq` 编码，**不得**偷偷改成 4 字节块号 —— 那会破坏线格式。
+> 第三方实现者：用 manifest 里的 `firstChunk` + `chunkIndex` 算 `seq`；**不要**用位移重算，
+> 也不要假设单文件最多 65536 块。
 
-#### 5.1.1 实现警告：`seq` 在 JavaScript 中必须用 `BigInt`
+#### 5.1.1 实现警告：宽度是逐字段的，不是"一个打包整数"
 
-`seq` 是 **64 bit 无符号整数**，而 JavaScript 的位运算符（`<<`、`|`、`>>>`）**强制把操作数转换为 32 bit 有符号整数**。因此下面这种写法是**错的**，会在 `fileIndex >= 32768` 时静默产生错误结果：
+AAD 是固定的 28 字节布局（§5.4），每个字段按自己的宽度写。超过 32 bit 的部分必须走 `BigInt` /
+`writeBigUInt64BE`；普通的 JS 位运算会静默截断到 32 bit：
 
 ```js
+// ✓ seq 就是普通 Number：累计块序号
+const seq = file.firstChunk + chunkIndex
+
+// ✓ AAD 字段按各自固定宽度写
+b.writeBigUInt64BE(BigInt(fileIndex), 0)    // 8 字节
+b.writeBigUInt64BE(BigInt(chunkIndex), 8)   // 8 字节
+b.writeBigUInt64BE(BigInt(totalChunks), 16) // 8 字节
+b.writeUInt32BE(plainLen >>> 0, 24)         // 4 字节
+
 // ✗ 错误：JS 位运算会截断到 32 bit
-const seq = (fileIndex << 16) | chunkIndex;
-
-// ✓ 正确：用 BigInt 全程保持 64 bit 语义
-const seq     = (BigInt(fileIndex) << 16n) | BigInt(chunkIndex);
-const buf     = Buffer.alloc(8);
-buf.writeBigUInt64BE(seq);                       // Node 侧序列化
-const back    = buf.readBigUInt64BE(0);          // Node 侧反序列化
-const fileIdx = Number(back >> 16n);             // 仅在确认范围后再降为 Number
-const chunkIdx= Number(back & 0xFFFFn);
+const seq = (fileIndex << 16) | chunkIndex
 ```
 
-浏览器侧同样必须用 `BigInt`（WebCrypto 的 `additionalData` 是字节串，因此**序列化后**再传入，不要在数值域上做位运算）。
+**中继模式的偏移（2026-11 更正）**：中继模式下房间的消息序号**不是**块的 `seq`。清单被分帧成
+`partCount` 条消息存在房间 seq `0 .. partCount-1`（§3R.3），全局序号为 `g` 的块存在房间 seq
+`partCount + g`（ack 是 `upTo = partCount + 1 + g`）。这个偏移只存在于传输层；AEAD 的输入（§5.3、§5.4）
+永远用 `fileIndex`/`chunkIndex`，从不用房间 seq。
 
-> **建议的单元测试**：取 `fileIndex = 65535`、`chunkIndex = 65535`，断言往返序列化/反序列化结果一致。这个用例能捕获上述 32 bit 截断缺陷。
-
-**保留值**：
-
-| `seq` | 含义 |
+| 房间消息序号 | 含义 |
 |---|---|
-| `0xFFFFFFFFFFFFFFFF`（全 1） | **manifest 专用**（§6.3） |
-| 其余 | 正常数据块 |
+| `0 .. partCount-1` | 分帧清单的各条（§3R.3） |
+| `partCount + g` | 全局序号为 `g` 的数据块 |
 
-### 5.2 帧格式（单块）
+### 5.2 分块响应格式（认证标签在响应头里，不在 body 里）
 
+body 里**没有** `seq ‖ ciphertext ‖ tag` 这种帧。`GET /api/chunk?seq=N` 的 body 只有密文；
+GCM 认证标签走 `X-Flicker-Tag` 响应头。
+
+```http
+GET /api/chunk?seq=123 HTTP/1.1
+200 OK
+Content-Type: application/octet-stream
+Content-Length: 1048576
+X-Flicker-Tag: <16 字节 GCM 标签的 BASE64>
+X-Flicker-File: 0
+X-Flicker-Chunk: 123
+Cache-Control: no-store, no-cache, must-revalidate
 ```
-┌──────────────────────┬───────────────────────────────┬──────────────┐
-│ seq (8 字节 BE)       │ ciphertext (chunkLen 字节)     │ tag (16 字节) │
-└──────────────────────┴───────────────────────────────┴──────────────┘
-```
 
-| 字段 | 长度 | 说明 |
-|---|---|---|
-| `seq` | 8 | `BE64(seq)`，**明文**（接收方需要它来派生 IV 与 AAD） |
-| `ciphertext` | `chunkLen` | 明文长度 `chunkLen`，等于 `min(chunkSize, fileSize - chunkIndex × chunkSize)` |
-| `tag` | 16 | GCM 认证标签，由 AEAD 输出 |
+| 位置 | 内容 |
+|---|---|
+| Body | 只有密文。GCM 密文与明文等长，所以 `Content-Length` 就是该块的明文长度 |
+| `X-Flicker-Tag` | 16 字节 GCM 认证标签的 BASE64 |
+| `X-Flicker-File` / `X-Flicker-Chunk` | 文件下标与该文件内的块下标。客户端要与自己请求的对一遍 |
+| `Content-Type` | `application/octet-stream` |
+| `Cache-Control` | `no-store, no-cache, must-revalidate` —— 缓存活得比会话还久，就违背了"用完即销毁" |
 
-**帧总长** = `8 + chunkLen + 16`。
-
-> `seq` 明文不构成泄露：它只暴露"文件序号与块序号"，而"文件的数量与总大小"本来就是明文摘要（§4.7）。**文件名与此无关，且已经被加密。**
+> 明文长度客户端本来就能算（`ci === chunks-1 ? size - (chunks-1)*chunkBytes : chunkBytes`），所以不重复放进头。
+> 中继模式则把同样两个字段放进消息体：`[0x02][tag 16][密文]`（§3R.3）。响应头是直连模式的 HTTP 形态；
+> 第三方客户端请按 §7.3 的端点契约实现。
 
 ### 5.3 IV 派生（12 字节，确定性）
 
 ```
-IV = ivSalt(4 字节) ‖ BE48(seq)(6 字节) ‖ [0x00] * 2
+IV = BE32(fileIndex)(4 字节) ‖ BE64(chunkIndex)(8 字节)
 ```
 
 | 部分 | 长度 | 来源 |
 |---|---|---|
-| `ivSalt` | 4 | **每个会话随机生成一次**，随 `GET /session` 的响应体下发（字段 `iv_salt`，BASE64）。**在会话生命周期内必须保持不变** —— 断点续传时若重新生成，接收方将无法重算 IV |
-| `BE48(seq)` | 6 | `seq` 的高 48 bit 大端。恰好放得下 `seq` 的 48 位有效范围 |
-| 填充 | 2 | 全零 |
+| `BE32(fileIndex)` | 4 | 文件在 manifest 中的序号（从 0 开始） |
+| `BE64(chunkIndex)` | 8 | 文件内的块序号（从 0 开始） |
 
 **为什么这样构造**：
 
 | 设计点 | 原因 |
 |---|---|
-| 确定性（不随块随机） | 断点续传时接收方必须能**独立重算**任意 `seq` 的 IV。若 IV 随机，则必须随包传输并额外保存 |
-| `ivSalt` 每会话随机 | 保证**不同会话**（即使密码相同）的 IV 空间不重叠。这是 GCM 的**绝对要求**：同一 key 下 IV 复用会直接摧毁 GCM 的安全性 |
-| IV 与 `seq` 一一对应 | 只要 `K_job` 唯一（§4.2 已保证），同一 key 下每个 IV 只出现一次 |
+| 确定性（不随块随机） | 断点续传时接收方必须能**独立重算**任意块的 IV。若 IV 随机，则必须随块传输并额外保存 |
+| IV 里包含 `fileIndex` | 不含它时，**每个文件的第 0 块**都会拿到同一个 IV（`000000000000000000000000`），而同一会话共用一把 key —— 跨文件 GCM nonce 复用，密文安全性直接被摧毁（这是 2026-11 修掉的真实 P0，见下） |
+| IV 里包含 64 bit 的 `chunkIndex` | 文件内唯一，且不被 16 bit 人为封顶 |
 
-> **必须同时满足的两个唯一性前提**：① `K_job` 每会话唯一（靠 `SID` 混入）；② `ivSalt` 每会话随机（4 字节 = 2³² 空间，会话数远小于此，碰撞概率可忽略）。**只要有一条被违反，GCM 就会灾难性失效**。实现时必须把这两条写成断言 + 测试。
+> **必须同时满足的两个唯一性前提**：① `K_enc` 每会话唯一 —— 由 16 字节随机会话盐 `S` 保证（碰撞概率 2⁻¹²⁸，§4.2）；
+> ② `(fileIndex, chunkIndex)` 在会话内唯一，因此每个 IV 在这把 key 下至多出现一次。两条都有测试守着
+> （`test/suite.test.js` 断言两个不同文件、相同 `chunkIndex` 的 IV 必须不同）。清单的 IV 是随清单下发的随机 12 字节，
+> 不由这个公式产生。
 
 ### 5.4 AAD 内容（28 字节）
 
 ```
-AAD = SID(16 字节) ‖ BE64(seq)(8 字节) ‖ BE32(totalChunks)(4 字节)
+AAD = BE64(fileIndex)(8) ‖ BE64(chunkIndex)(8) ‖ BE64(totalChunks)(8) ‖ BE32(plainLen)(4)
 ```
 
 | 部分 | 长度 | 绑定的东西 |
 |---|---|---|
-| `SID` | 16 | **会话绑定**：跨会话搬运块会失败 |
-| `BE64(seq)` | 8 | **坐标绑定**：乱序、重排、跨文件拼接会失败 |
-| `BE32(totalChunks)` | 4 | **长度绑定**：截断攻击会失败（若攻击者删掉尾部并声称文件更短，`totalChunks` 变化导致 AAD 不符） |
+| `BE64(fileIndex)` | 8 | **文件身份**：块不能被搬到另一个文件里 |
+| `BE64(chunkIndex)` | 8 | **坐标绑定**：乱序、重复、跨文件拼接会失败 |
+| `BE64(totalChunks)` | 8 | **长度绑定**：截断攻击会失败（若攻击者删掉尾部并声称文件更短，`totalChunks` 变化导致 AAD 不符） |
+| `BE32(plainLen)` | 4 | **精确长度**：最后一块的明文长度也被认证，"把最后一块改短"会被发现 |
 
-**这 28 字节是整条数据面安全性的核心。** 它把"这一块密文"钉死在"哪个会话的哪个文件的第几块、该文件共几块"上。任何挪动都会在解密时被 GCM 标签拒绝。
+**这 28 字节是整条数据面安全性的核心。** 它把"这一块密文"钉死在"哪个文件的第几块、该文件共几块"上。任何挪动都会在解密时被 GCM 标签拒绝。会话绑定是间接的（来自由每会话盐派生的 `K_enc`），不是 AAD 里有个 `SID` 字段 —— `SID` 不在 AAD 里。
 
-> `totalChunks` = `ceil(fileSize / chunkSize)`，由 manifest 提供。
+> `totalChunks` = **该文件**的块数 = `ceil(fileSize / chunkBytes)`（空文件算 1 块），由 manifest 提供。`chunkBytes` 是逐文件的 manifest 字段，所以同一会话里的两个文件可以用不同的块大小。
 
 ### 5.5 分块大小与内存
 
 | 量 | 值 | 说明 |
 |---|---|---|
 | `chunkSize` | `1048576`（1 MiB） | 套件成员 |
-| 单块密文帧上限 | `8 + 1048576 + 16 = 1048600` 字节 | |
+| 单条消息上限（中继模式） | `1 + 16 + 1048576 = 1048593` 字节 | 类型字节 + 标签 + 密文；协议保证中继至少收得下 `1 MiB + 17`（§3R.3） |
 | 发送端缓冲 | 1 块（复用后清零） | 见 `设计文档.md` 第六章 |
 | 接收端内存 | `O(chunkSize)`，与文件大小**无关** | 靠流式写盘实现（§5.7） |
 
@@ -1410,24 +1450,27 @@ web/receiver.html    rel.replace(/[<>:"|?*\x00-\x1f]/g, '_')      ← 只有一�
 ### 6.3 manifest 的加密与传输
 
 ```
-manifest_seq = 0xFFFFFFFFFFFFFFFF        （全 1，保留）
 manifest_pt  = UTF-8(JSON(manifest))
-manifest_aad = SID(16 字节)               （无 seq、无 totalChunks —— 见下）
-manifest_ct  = AEAD.seal(K_job, IV_manifest, manifest_pt, manifest_aad)
-
-IV_manifest  = ivSalt(4) ‖ [0xFF] * 6 ‖ [0x00] * 2      （12 字节）
+manifest_aad = UTF-8("flicker/1/manifest")        （18 字节 ASCII）
+manifest_iv  = randomBytes(12)                     （随清单下发，不保密）
+manifest_ct  = AES-256-GCM.seal(K_enc, manifest_iv, manifest_pt, manifest_aad)
 ```
 
-**`IV_manifest` 的特殊性**：§5.3 的通用公式产生的 IV 中，中间 6 字节等于 `BE48(seq)`。`IV_manifest` 把中间 6 字节设为全 `0xFF`，等价于 `BE48(0xFFFFFFFFFFFF)`。因此它与数据块 IV 冲突的条件是：
+**清单的 IV 是随机的，不由 §5.3 派生**：没有保留 `seq`，也没有专门的"清单 IV"公式。加密方生成 12 字节随机数，
+与密文一起下传 —— 直连模式是 `GET /session` 响应里的 `{iv, ct, tag}`；中继模式是分帧清单消息里的
+`salt(16) ‖ iv(12) ‖ tag(16) ‖ ct`（§3R.3）。
 
 ```
-fileIndex = 0xFFFFFFFFFFFF      （即 seq 高 48 bit 全 1）
-且 chunkIndex 的高 2 字节与 0xFFFF 的对应位一致
+manifest_aad 的 18 字节：
+66 6C 69 63 6B 65 72 2F 31 2F 6D 61 6E 69 66 65 73 74   = "flicker/1/manifest"
 ```
 
-而 §5.1 已经**硬性禁止** `fileIndex` 接近该值 —— 实现必须带断言 `fileIndex < 0xFFFFFFFFFFFF`。在这个约束下，`IV_manifest` 与任何数据块 IV **不会冲突**。
+每个会话在 `K_enc` 下只加密**一份**清单，所以用一个新鲜随机 IV 既够用又简单。它与某个数据块 IV 相同的概率约 2⁻⁹⁶
+（而且两者的 AAD 长度不同，跨类型混淆本来就会失败 —— §6.3.1）。
 
-> **实现要求**：这条断言不是"防御性编程"，而是 GCM 安全性的前提之一（IV 在同一 key 下不得复用）。必须写成启动期检查 + 单元测试，不能只写在注释里。
+> **0.1.0 文档这里也是错的（2026-11 更正）**：它写的是 `manifest_seq = 0xFFFFFFFFFFFFFFFF`、用 `K_job`、
+> `IV_manifest = ivSalt ‖ [0xFF]*6 ‖ [0x00]*2`、`AAD = SID(16)`。这些在实现里**都不存在**；照那份文档写的客户端
+> 解不开清单。真实值就是上面的（`src/suite/flicker1.js` 的 `MANIFEST_AAD` 与 `sealManifest()`）。
 
 #### 6.3.1 两种 AAD 的差异（必须分清，容易实现错）
 
@@ -1435,34 +1478,37 @@ manifest 与数据块使用**不同长度**的 AAD。这是刻意的，因为 ma
 
 | 对象 | AAD 长度 | 内容 |
 |---|---|---|
-| **数据块** | 28 字节 | `SID(16) ‖ BE64(seq)(8) ‖ BE32(totalChunks)(4)` |
-| **manifest** | 16 字节 | `SID(16)` |
+| **数据块** | 28 字节 | `BE64(fileIndex) ‖ BE64(chunkIndex) ‖ BE64(totalChunks) ‖ BE32(plainLen)` |
+| **manifest** | 18 字节 | UTF-8 ASCII `"flicker/1/manifest"` |
 
-两者都绑定 `SID`（因此都不能跨会话搬运），区别在于数据块还绑定了"坐标"与"文件长度"。
+manifest 的 AAD 是固定的域分隔串，不是会话数据：它绑定"这段密文是一份清单"，所以清单永远不会被当成数据块解开
+（反过来也一样）。数据块的 AAD 才绑定坐标与文件长度。会话绑定来自密钥，不来自 AAD 字段。
 
-> **不得**为了让两种 AAD 长度一致而给 manifest 补零到 28 字节 —— 补零会引入"某个 `seq`/`totalChunks` 组合的全零 AAD 与 manifest 的 AAD 相同"的理论冲突面。**让它们长度不同，反而消除了歧义。**
+> **不得**为了让两种 AAD 长度一致而给 manifest 补零到 28 字节 —— 补零会引入"某个数据块的 AAD 与 manifest 的 AAD
+> 相同"的理论冲突面。**让它们长度不同，反而消除了歧义。** 实现里有一条针对这件事的启动自检
+> （`src/suite/flicker1.js` 里 `MANIFEST_AAD.length === 28` 就抛错）。
 
 **manifest 的传输路径（两条）**：
 
 | 路径 | 时机 | 说明 |
 |---|---|---|
-| 内联在 `GET /session` 响应 | 直连模式 | 接收方**在读密码之前**即拿到 `manifest_ct`；文件数量与总大小以**明文摘要**另外提供（§4.7） |
-| 作为保留 `seq` 的块 | 会合模式 / 流式模式 | relay 模式下 manifest 也可能内联在 `GET /session` 里，因为数据面本来就走直连 |
+| 内联在 `GET /session` 响应 | 直连模式 | 接收方**在读密码之前**即拿到 `{iv, ct, tag}`。文件数量与总大小都在加密的清单里，所以密码输入前什么都不泄露（§4.7） |
+| 分帧放进中继房间 | 中继模式 | `M = [0x01][salt 16][iv 12][tag 16][ct]` 拆成 `partCount` 条消息，存在房间 seq `0 .. partCount-1`（§3R.3）；数据块从 `partCount` 开始 |
 
 **接收方的处理顺序（强制）**：
 
 ```
-1. 从 GET /session 拿到 manifest_ct、iv_salt、salt、suite
+1. 从 GET /session 拿到 {iv, ct, tag}、salt、suite   （中继模式：先把分帧的各条拼回 M）
 2. 用户输入 P
 3. 算 V → K_auth / K_enc（此步可能耗时，需 UI 提示）
-4. 握手（§4）→ 得到 SID、K_job
-5. 解 manifest_ct，校验 manifest.sid === SID（不符 → E_SID_MISMATCH，中止）
+4. 握手（§4）→ 得到 SID
+5. 用 K_enc 解清单，校验 manifest.sid === SID（不符 → E_SID_MISMATCH，中止）
 6. 执行 §6.2 的全部路径校验（不符 → E_PATH_UNSAFE，中止）
-7. 校验 files[].chunks === ceil(size / chunkSize)（不符 → E_MANIFEST_INVALID）
+7. 校验 files[].chunks === ceil(size / chunkBytes)（不符 → E_MANIFEST_INVALID）
 8. 开始 L5 传输
 ```
 
-> **第 5 步不可省**：它把 manifest 钉死在这个会话上，防止 relay 用**另一个会话**的 manifest 做替换攻击（虽然 relay 拿不到 `K_job`，但防御性校验成本极低）。
+> **第 5 步不可省**：它把 manifest 钉死在这个会话上，防止 relay 用**另一个会话**的 manifest 做替换攻击（虽然 relay 拿不到 `K_enc`，但防御性校验成本极低）。
 
 ### 6.4 Merkle 根的定义
 
@@ -1991,6 +2037,7 @@ IV 与 AAD 的算法与 §5.3、§5.4 **完全相同**（AAD = `fileIndex ‖ ch
 | `TOO_MANY_FILES` / `TOO_MANY_BYTES` | `413` | 超过 `limits` 报的上限 | 少选一些再发 |
 | `E_PATH_UNSAFE` | `400` | 文件名带分隔符或不过那 12 条规则 | **中止整个会话**，未写任何字节 |
 | `E_MANIFEST_DUPLICATE_PATH` | `400` | 清单里有重名 | 同上 |
+| `E_MANIFEST_UNVERIFIABLE` | `400` | 某个文件没有可用的 `sha256`（缺失 / 长度不对 / 非十六进制） | 整份清单在**写任何字节之前**被拒；客户端重发一份正确的 |
 | `BAD_CHUNK_BYTES` / `BAD_CHUNKS` | `400` | 分块参数不自洽 | 中止（AAD 绑了总块数，硬发必然失败） |
 | `BAD_CHUNK` | `400` | 分块请求体太短（< 16 字节，连 tag 都装不下） | 中止；正常客户端不会触发 |
 | `NO_SPACE` | `507` | 可用空间 < 总量 × 1.1 | **开工前**拒绝；清出空间后重来 |
@@ -2312,9 +2359,9 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 发起方 A (Node)               relay                  接收方 B (Chrome)
      │                          │                          │
      │ ══ L4 准备 ══             │                          │
-     │ 生成 P, S(16B), ivSalt(4B), token(8B)                │
+     │ 生成 P, S(16B), token(16B)                           │
      │ V = PBKDF2(P,S,600000)   │                          │
-     │ K_room = HKDF(V,"room")  │                          │
+     │ K_room = HKDF(V,"flicker/1/room")                    │
      │ room_name = HEX(K_room)  │                          │
      │                          │                          │
      │ ══ L1 会合 ══             │                          │
@@ -2344,23 +2391,23 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
      │                          │                          │
      │ 常数时间校验 mac_r        │                          │
      │ ✓ 通过                    │                          │
-     │ nonce_i = random(32)     │                          │
-     │ SID = SHA256(nonce_r‖nonce_i)[0..16)                 │
-     │ K_job = HKDF(K_enc, SID) │                          │
+     │ SID = randomBytes(16)    │                          │
+     │ （没有 K_job：K_enc 就是 AES 的 key）                 │
      │ mac_i = HMAC(K_auth, ...)│                          │
      │                          │                          │
      │ POST AUTH_OK             │                          │
-     │  {nonce_i,sid,mac_i}     │                          │
+     │  {nonce_i,sid,mac_i,     │                          │
+     │   macProfile}            │                          │
      ├─────────────────────────>│──── 转发 ───────────────>│
      │                          │                          │
      │                          │     校验 mac_i ✓          │
-     │                          │     算 SID、K_job         │
+     │                          │     记下 SID              │
      │                          │                          │
      │ ══ L2 传输层直连（relay 从此不再参与）════              │
      │                          │                          │
      │<────────── GET /session (X-Flicker-Sid 尚无) ────────│
-     │─────────── 200 {suite,salt,iv_salt,manifest_ct, ────>│
-     │                files,bytes}                          │
+     │─── 200 {suite,salt,manifest:{iv,ct,tag},kdf, ───────>│
+     │         chunkBytes}                                  │
      │                          │     解 manifest_ct ✓      │
      │                          │     校验 sid === SID ✓    │
      │                          │     执行 §6.2 路径校验 ✓   │
@@ -2370,10 +2417,10 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
      │                          │                          │
      │<── GET /chunk?seq=0 ─────┼──────────────────────────│
      │    X-Flicker-Sid: ...    │                          │
-     │─── 200 [seq‖ct‖tag] ─────┼─────────────────────────>│
-     │                          │   IV = ivSalt‖BE48(seq)‖00│
-     │                          │   AAD = SID‖BE64(seq)‖BE32(chunks)
-     │                          │   open(K_job, IV, ct, AAD)│
+     │─── 200 密文 ─────────────┼─────────────────────────>│
+     │    （标签在 X-Flicker-Tag）│   IV = BE32(fileIndex)‖BE64(chunkIndex)
+     │                          │   AAD = fileIndex‖chunkIndex‖chunks‖plainLen
+     │                          │   open(K_enc, IV, ct, AAD)│
      │                          │   ✓ 写入 createWritable() │
      │                          │   算 leaf hash 存入内存    │
      │                          │                          │
@@ -2393,7 +2440,7 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
      │                          │                          │
      │ ══ 销毁 ══                │                          │
      │ V,K_auth,K_enc,         │                          │
-     │ K_job,K_room,nonce 全部   │                          │
+     │ K_room,nonce 全部         │                          │
      │ fill(0) 覆写             │                          │
      │ 关闭监听、断开 socket      │                          │
      │ DELETE /room/{rn}        │                          │
@@ -2416,9 +2463,9 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 |---|---|---|
 | `room_name`（64 hex） | 密码 `P` | `room_name = HEX(HKDF(PBKDF2(P,S)))`，单向 |
 | 消息的**大小**与**时间** | 盐 `S`、令牌 `token` | 放在 URL fragment，不进 HTTP 请求（§4.4.2） |
-| 双方消息的 `type`、`ts`、`from` | 会话密钥 `K_auth`/`K_job` | 永不上线 |
+| 双方消息的 `type`、`ts`、`from` | 会话密钥 `K_auth`/`K_enc` | 永不上线 |
 | 连接双方的 IP 与 UA | **文件名** | manifest 整体加密（§6.3） |
-| 明文摘要：文件数量与总字节数 | **文件内容** | L5 分块加密；且**数据根本不经过 relay**（§3.1） |
+| 消息条数与每条长度（据此可推算传输总量） | **文件数量、文件与目录结构** | 它们都在加密的 manifest 里，不再以明文摘要发送（§4.7） |
 | `agent` 字符串（若发送） | 目录结构 | 在加密的 manifest 中 |
 
 **relay 能做的攻击**：
@@ -2426,7 +2473,7 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 | 攻击 | 是否可行 | 缓解 |
 |---|---|---|
 | 读取文件内容 | ❌ 不可能 | 数据不经过 relay + 端到端加密 |
-| 修改文件内容 | ❌ 不可能 | GCM 标签 + AAD 绑定 `SID` |
+| 修改文件内容 | ❌ 不可能 | GCM 标签 + AAD 绑定 `fileIndex`/`chunkIndex`/`totalChunks` |
 | 学习密码 | ❌ 不可能 | 密码从不上线 |
 | 拒绝服务（不回消息） | ✅ 可行 | 表现为超时，UI 明确报错；可换 relay 重试 |
 | 削成套件列表（降级攻击） | ✅ **但会被检测** | `suite_id` 绑定在 MAC 中（§2.6）：双方选的套件不同 → MAC 必然失败 |
@@ -2440,7 +2487,7 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 | 泄露项 | 严重性 | 可能的缓解（未实现） |
 |---|---|---|
 | 通信双方 IP、时间 | 中 | 用 Tor / VPN（超出本项目范围） |
-| 传输文件的数量与总大小 | 低-中 | 填充（padding）到固定档位（**未实现**，会牺牲带宽） |
+| 总传输量与消息条数（能看出大概多大、传了多久，但看不出有几个文件） | 低-中 | 填充（padding）到固定档位（**未实现**，会牺牲带宽） |
 | 房间名（随机 64 hex） | 低 | 无法避免（relay 必须能路由） |
 | 传输持续时间 | 低 | 无法避免 |
 
@@ -2451,9 +2498,9 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 | 层面 | 机制 |
 |---|---|
 | 握手 | `nonce_r` / `nonce_i` 每次随机 32 字节；`mac_r` 里含 `nonce_r` |
-| 会话 | `SID` 混入 `K_job`，跨会话密钥不同 |
-| 数据块 | AAD 含 `SID` 与 `seq`，块不能跨会话或跨位置搬运 |
-| 会话内块重放 | `seq` 唯一 + IV 由 `seq` 派生 → 同一 `seq` 的块只能有一份合法密文 |
+| 会话 | `K_enc` 每会话不同（16 字节随机会话盐 `S`） |
+| 数据块 | AAD 绑定 `fileIndex`/`chunkIndex`/`totalChunks`，且 `K_enc` 每会话不同 → 块不能跨会话或跨位置搬运 |
+| 会话内块重放 | `(fileIndex, chunkIndex)` 唯一 + IV 由它派生 → 同一块的合法密文只有一份 |
 | 房间消息重放 | relay 的 `cursor` 单调 + 客户端按 `(from, seq)` 去重 |
 
 ### 11.4 抗篡改
@@ -2461,9 +2508,9 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 | 目标 | 机制 |
 |---|---|
 | 密文篡改 | GCM 标签（16 字节） |
-| 块重排 | AAD 含 `BE64(seq)` |
-| 跨文件拼接 | AAD 的 `seq` 高 48 bit 是 `fileIndex` |
-| 截断 | AAD 含 `BE32(totalChunks)` |
+| 块重排 | AAD 含 `BE64(chunkIndex)` |
+| 跨文件拼接 | AAD 含 `BE64(fileIndex)` |
+| 截断 | AAD 含 `BE64(totalChunks)` 与精确的 `BE32(plainLen)` |
 | 文件替换 | `files[].sha256` + `files[].chunkHashes` |
 | manifest 替换 | `manifest.sid === SID` 校验 |
 | 套件降级 | `suite_id` 绑定在 `mac_r`/`mac_i` 中 |
@@ -2473,12 +2520,12 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 
 ```
 线上出现过的所有与密码相关的量：
-  ① room_name = HEX(HKDF(PBKDF2(P,S,600000),"room"))     → 单向，不可反推
+  ① room_name = HEX(HKDF(PBKDF2(P,S,600000),"flicker/1/room")) → 单向，不可反推
   ② mac_r / mac_i = HMAC(K_auth, ...)                     → 单向，且 nonce 一次性
-  ③ manifest_ct / 密文块 = AEAD(K_job, ...)               → 单向
+  ③ manifest_ct / 密文块 = AEAD(K_enc, ...)               → 单向
 
 从未出现在线上的量：
-  P（密码）、S（在 fragment 或 TLS 内）、V、K_auth、K_enc、K_job、nonce_i 的原始值（明文发送但不敏感）
+  P（密码）、S（在 fragment 或 TLS 内）、V、K_auth、K_enc、nonce_i 的原始值（明文发送但不敏感）
 ```
 
 **抓包者能得到的结论**：只有"有人在做一次传输"。它无法离线暴力破解出密码，因为：
@@ -2486,14 +2533,14 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 - 即使拿到 `mac_r`，要验证一次密码猜测需要：猜 `P'` → PBKDF2 60 万轮 → HKDF → HMAC → 比较。**每次猜测的成本 = 60 万轮 PBKDF2**
 - 而 `nonce_r` 是一次性的，所以预计算表**无效**
 
-> **残余风险**：**弱密码**。若用户把密码设成 `123456`，攻击者抓到 `mac_r` 后可以离线枚举（每次 60 万轮 PBKDF2 约 0.1~0.5 秒，`123456` 只需一次尝试）。这就是为什么发送端**默认生成强密码**（4 词 ≈ 52 bit）且**必须二次确认**。**这是本协议唯一无法用密码学解决的风险，只能靠 UI 引导。**
+> **残余风险**：**弱密码**。若用户把密码设成 `123456`，攻击者抓到 `mac_r` 后可以离线枚举（每次 60 万轮 PBKDF2 约 0.1~0.5 秒，`123456` 只需一次尝试）。这就是为什么发送端**默认生成强密码**（4 个词、词表 256 词即每词 8 bit ≈ 32 bit；词表大小以 `src/suite/flicker1.js` 实际为准）且**必须二次确认**。**这是本协议唯一无法用密码学解决的风险，只能靠 UI 引导。**
 
 ### 11.6 前向保密（诚实说明）
 
 `FLICKER/1` **不提供前向保密（forward secrecy）**。原因：密钥完全由密码派生，没有 Diffie-Hellman 交换。若密码事后泄露，且攻击者保存了当时的密文，则可以解密。
 
 **缓解**：
-- 会话生命周期以分钟计（10 分钟超时），且 `ivSalt` 与 `S` 每会话随机
+- 会话生命周期以分钟计（10 分钟超时），且会话盐 `S` 每会话随机
 - 密码默认随机生成，用完即弃
 - `FLICKER/4`（X25519）将引入前向保密
 
@@ -2572,15 +2619,13 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 | `SALT_LEN` | 16 字节 | §2.3 |
 | `NONCE_LEN` | 32 字节 | §2.3 |
 | `IV_LEN` | 12 字节 | §2.3 |
-| `IV_SALT_LEN` | 4 字节 | §5.3 |
 | `SID_LEN` | 16 字节 | §4.5 |
 | `PBKDF2_ITERATIONS` | 600000 | §2.4 |
 | `CHUNK_SIZE` | 1048576 字节 | §2.4 |
 | `TAG_SIZE` | 16 字节 | §2.4 |
 | `AAD_LEN` | 28 字节 | §5.4 |
-| `MANIFEST_SEQ` | `0xFFFFFFFFFFFFFFFF` | §5.1 |
-| `MAX_CHUNKS_PER_FILE` | 65536 | §5.1 |
-| `MAX_FILE_BYTES` | 68719476736（64 GiB） | §5.1 |
+| `MANIFEST_AAD_LEN` | 18 字节 | §6.3.1 |
+| `MAX_MANIFEST_PARTS` | 1024 | §3R.3 |
 | `ROOM_TTL` | 900000 ms | §3.4 |
 | `ROOM_MAX_MSGS` | 100 | §3.4 |
 | `ROOM_MAX_BODY` | 8192 字节 | §3.4 |
@@ -2593,12 +2638,12 @@ gift 的**分发通道**与**站点模型**相关（L0 载具层的三种来源�
 
 | 用途 | 字节 | ASCII |
 |---|---|---|
-| RECV MAC 域 | 9 | `flk1-recv` |
-| SEND MAC 域 | 9 | `flk1-send` |
-| 角色 recv | 4 | `recv` |
-| 角色 send | 4 | `send` |
-| HKDF label | 4 | `room` |
-| HKDF label | 4 | `auth` |
-| HKDF label | 3 | `enc` |
+| v2 recv MAC 前缀（默认） | 16 | `FLICKER/1\nrecv\n` |
+| v2 send MAC 前缀（默认） | 16 | `FLICKER/1\nsend\n` |
+| v1 recv MAC 前缀（0.1.0 兼容） | 15 | `flicker/1/recv\n` |
+| v1 send MAC 前缀（0.1.0 兼容） | 15 | `flicker/1/send\n` |
+| HKDF label | 14 | `flicker/1/room` |
+| HKDF label | 14 | `flicker/1/auth` |
+| HKDF label | 13 | `flicker/1/enc` |
 
-> **实现断言**：以上字符串必须以 **ASCII 字节**（每字符 1 字节）拼接，**不是** UTF-8 编码的 JS 字符串长度。全部为 ASCII 字符，因此两者结果相同，但实现中应显式使用 `Buffer.from(s, 'ascii')` / `new TextEncoder().encode(s)` 以避免歧义。
+> **实现断言**：以上字符串必须以 **ASCII 字节**（每字符 1 字节）拼接，**不是** UTF-8 编码的 JS 字符串长度。全部为 ASCII 字符，因此两者结果相同，但实现中应显式使用 `Buffer.from(s, 'ascii')` / `new TextEncoder().encode(s)` 以避免歧义。MAC 前缀末尾的换行（`0x0A`）是被认证材料的一部分，不能丢。

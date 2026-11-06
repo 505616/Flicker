@@ -11,11 +11,14 @@
 
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir, networkInterfaces } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { deriveVerifier, deriveKeys, receiverMac } from '../src/suite/flicker1.js'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const CLI = path.join(root, 'bin', 'flicker.js')
@@ -62,9 +65,9 @@ afterEach(async () => {
 })
 
 /** 启动 GUI 并等它报出地址 */
-function startGui() {
+function startGui(extraArgs = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, '--gui'], {
+    const child = spawn(process.execPath, [CLI, '--gui', ...extraArgs], {
       env: { ...process.env, FLICKER_NO_BROWSER: '1' },
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     })
@@ -86,8 +89,8 @@ function startGui() {
   })
 }
 
-async function bootGui() {
-  const gui = await startGui()
+async function bootGui(extraArgs = []) {
+  const gui = await startGui(extraArgs)
   cleanups.push(async () => { try { gui.child.kill() } catch { /* 已退出 */ } })
   const api = async (p, body) => {
     const r = await fetch(gui.base + 'api/' + p, {
@@ -535,7 +538,7 @@ test('图形界面：可以换密码、可以切换赠送选项', { timeout: 600
   assert.equal((await api('state')).json.gift, true, '应能再打开')
 })
 
-test('⭐ 图形界面：「立即销毁」必须真的销毁，不是只改一下界面文字', { timeout: 150000 }, async () => {
+test('⭐ 图形界面：「立即销毁」必须真的销毁，不是只改一下界面文字', { timeout: 260000 }, async () => {
   // 用户实测反馈的原话："发送端的销毁没有用，点击没有反应"。
   // 原因是两条叠在一起：
   //   ① 传输启动后 `S.run` 已经存在，老代码用 `if (!S.run && …)` 判断，
@@ -559,9 +562,15 @@ test('⭐ 图形界面：「立即销毁」必须真的销毁，不是只改一�
   //    实测超过过 15 秒 —— 原先 100×150ms 的预算正好卡在这个边缘，
   //    结果是一条**与本次改动无关**的偶发失败（2026-10 真出现过一次）。
   //    预算放宽到 40 秒，并把"卡在哪一步"写进断言消息里，免得下次还要猜。
+  //
+  // ⚠️ 2026-11 又踩了一次：整套 929 条用例在 24 核机器上**并发 24 个文件**跑时，
+  //    证书这条链（PowerShell + certutil）被别的用例挤到 40 秒都走不完，
+  //    而单独跑这个文件时只要几秒。这仍是环境争用，不是产物问题 ——
+  //    但一条"看运气"的用例没有价值，所以预算再放到 120 秒（600×200ms），
+  //    并把用例自身超时提到 260 秒，保证"慢"不会变成"红"。
   const t0 = Date.now()
   let st = null
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 600; i++) {
     await sleep(200)
     st = (await api('state')).json
     if (st.phase === 'waiting' && st.url) break
@@ -584,8 +593,9 @@ test('⭐ 图形界面：「立即销毁」必须真的销毁，不是只改一�
   const r = await api('destroy', {})
   assert.equal(r.status, 200)
 
-  // 收尾要点时间：会话销毁 → runSend 发现 → 走完销毁链 → 回传清单
-  for (let i = 0; i < 120; i++) {
+  // 收尾要点时间：会话销毁 → runSend 发现 → 走完销毁链 → 回传清单。
+  // 同样按满负载给预算（30 秒）：证书移除 / 临时目录清理都要跑子进程。
+  for (let i = 0; i < 200; i++) {
     await sleep(150)
     st = (await api('state')).json
     if (st.phase === 'destroyed' || st.phase === 'error') break
@@ -658,4 +668,295 @@ test('图形界面：二维码编码器可被页面加载', { timeout: 60000 }, 
   assert.ok(Array.isArray(m) && m.length > 20, '应返回一个合理的矩阵')
   assert.ok(m.every((row) => row.length === m.length), '矩阵应为正方形')
   assert.ok(m.every((row) => row.every((v) => v === 0 || v === 1)), '应只含 0/1')
+})
+// ── 本轮修复的反向用例（P1-1~P1-4 / P2-3 / P2-9 / P3-11）────────────
+
+/**
+ * 用 node:http 直接发请求。
+ * ⚠️ 不能用 fetch：Fetch 规范禁止调用方改 Host 头，而 DNS rebinding 的判据
+ *    必须能造出"Host 是攻击者域名"的请求。
+ */
+function rawGuiRequest({ port, path: p, method = 'GET', headers = {}, body }) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path: p, method, headers }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }))
+    })
+    req.on('error', reject)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
+}
+
+/**
+ * 连发送端会话的 HTTPS 接口。
+ * ⚠️ 这里用 rejectUnauthorized:false 只是为了**驱动界面状态机**（TLS 链本身由
+ *    e2e/recv-cli 那几条用例用导出的 CA 严格验证）。
+ */
+function sessionRequest(url, { method = 'GET', body, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const req = httpsRequest({
+      method, host: u.hostname, port: u.port || 443, path: u.pathname + u.search,
+      headers, rejectUnauthorized: false,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks)
+        resolve({ status: res.statusCode, text: buf.toString('utf8'), json: () => JSON.parse(buf.toString('utf8')) })
+      })
+    })
+    req.on('error', reject)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
+}
+
+test('⭐ 图形界面：拒绝跨站请求与 DNS rebinding（P1-4）', { timeout: 60000 }, async () => {
+  // 只监听 127.0.0.1**挡不住**这两类：任意网页都能 fetch 本机端口（CSRF），
+  // 攻击者域名解析到 127.0.0.1 后浏览器还会把它当成同源（rebinding 读文件列表）。
+  const { gui } = await bootGui()
+  const port = Number(new URL(gui.base).port)
+  const goodHost = `127.0.0.1:${port}`
+
+  // 正常同源请求照旧放行
+  assert.equal((await rawGuiRequest({ port, path: '/api/state', headers: { Host: goodHost } })).status, 200)
+
+  // ① DNS rebinding：Host 不是本机回环 → 403（读接口同样保护）
+  const rebindBrowse = await rawGuiRequest({ port, path: '/api/browse', headers: { Host: 'evil.example' } })
+  assert.equal(rebindBrowse.status, 403, 'Host 不是本机回环时必须拒绝 —— 否则 rebinding 能读文件列表')
+  assert.match(rebindBrowse.text, /Host|rebinding/)
+  assert.equal((await rawGuiRequest({ port, path: '/api/state', headers: { Host: `evil.example:${port}` } })).status, 403,
+    '绑定了攻击者域名的 Host 一样要拒')
+
+  // ② 跨站 Origin → 403；同源 Origin（浏览器 POST 会带）要放行
+  const cross = await rawGuiRequest({
+    port, path: '/api/clear', method: 'POST',
+    headers: { Host: goodHost, Origin: 'https://evil.example', 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(cross.status, 403, '跨站 Origin 必须拒绝（否则任意网页可 CSRF 改状态）')
+  const same = await rawGuiRequest({
+    port, path: '/api/clear', method: 'POST',
+    headers: { Host: goodHost, Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(same.status, 200, '同源 POST（浏览器会带 Origin）必须放行')
+
+  // ③ 写接口必须是 application/json：text/plain 是"跨站简单请求"，浏览器不发预检
+  const plain = await rawGuiRequest({
+    port, path: '/api/add', method: 'POST',
+    headers: { Host: goodHost, 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ paths: ['D:/definitely/not/here'] }),
+  })
+  assert.equal(plain.status, 415, 'text/plain 的写请求必须拒绝 —— 否则 CSRF 靠简单请求就能打进来')
+  assert.equal((await (await fetch(gui.base + 'api/state')).json()).files.length, 0,
+    '被拒的请求不能改到状态')
+})
+
+test('⭐ 图形界面发送：onEvent 真的接到状态机（连接/认证/进度都更新，P1-1/P3-13）',
+  { timeout: 180000 }, async () => {
+  // 这一条走的是真实协议：打开页面 → 取盐 → 握手 → 拉一块。
+  // 从前 runSend 从不调用入口传进来的 onEvent —— 界面永远停在"等待对方连接"，
+  // 传输进度、authed、transfer-complete 全都到不了 S。
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-onevent-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'a.bin'), Buffer.alloc(64 * 1024, 7))
+
+  const { api } = await bootGui()
+  await api('add', { paths: [dir] })
+  const password = 'gui-event-test'
+  assert.equal((await api('start', { password })).status, 200)
+
+  let st = null
+  for (let i = 0; i < 200; i++) {
+    await sleep(200)
+    st = (await api('state')).json
+    if (st.url && st.phase === 'waiting') break
+    if (st.phase === 'error') break
+  }
+  assert.equal(st.phase, 'waiting', `应停在等待（实际 ${st.phase}）`)
+  assert.ok(st.url, '应拿到接收端链接')
+
+  // 用回环地址连（URL 里的主地址可能是局域网 IP，测试机上未必可达）
+  const link = new URL(st.url)
+  const token = link.searchParams.get('k')
+  const base = `https://127.0.0.1:${link.port}`
+  assert.ok(token, '链接里应带一次性令牌')
+
+  assert.equal((await sessionRequest(`${base}/?k=${encodeURIComponent(token)}`)).status, 200, '打开页面（消费令牌）')
+  const info = await (await sessionRequest(`${base}/api/session?k=${encodeURIComponent(token)}`)).json()
+  const verifier = deriveVerifier(password, Buffer.from(info.salt, 'base64'))
+  const keys = deriveKeys(verifier)
+  const startAuth = await (await sessionRequest(`${base}/api/auth/start?k=${encodeURIComponent(token)}`, { method: 'POST' })).json()
+  const challenge = Buffer.from(startAuth.challenge, 'base64')
+  const mac = receiverMac(keys.auth, challenge).toString('base64')
+  const fin = await sessionRequest(`${base}/api/auth/finish`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge: startAuth.challenge, mac, macProfile: 'v2' }),
+  })
+  assert.equal(fin.status, 200, `握手应当成功：${fin.text}`)
+  const { sid } = fin.json()
+
+  // ① authed → 界面阶段变成 transfer（P1-1 的核心断言）
+  let phase = null
+  for (let i = 0; i < 50; i++) {
+    await sleep(100)
+    phase = (await api('state')).json.phase
+    if (phase === 'transfer') break
+  }
+  assert.equal(phase, 'transfer', 'authed 之后界面阶段应变成 transfer —— 停在 waiting 就是 P1-1 又回来了')
+
+  // ② 拉一块 → 界面进度要动
+  const chunk = await sessionRequest(`${base}/api/chunk?seq=0&sid=${encodeURIComponent(sid)}`)
+  assert.equal(chunk.status, 200, `拉块应当成功：${chunk.text}`)
+  let progress = null
+  for (let i = 0; i < 50; i++) {
+    await sleep(100)
+    progress = (await api('state')).json.progress
+    if (progress && progress.sentBytes > 0) break
+  }
+  assert.ok(progress && progress.sentBytes > 0,
+    `chunk 事件应当更新界面进度（P1-1），实际是 ${JSON.stringify(progress)}`)
+
+  // 收尾：把这场会话销毁掉，别留给后面的用例
+  await api('destroy', {})
+  for (let i = 0; i < 100; i++) {
+    await sleep(100)
+    if ((await api('state')).json.phase === 'destroyed') break
+  }
+})
+
+test('⭐ 图形界面发送：并发启动被拒，且扫描阶段的「立即销毁」真的会销毁（P2-3/P1-2）',
+  { timeout: 180000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-scan-destroy-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'a.bin'), Buffer.alloc(256 * 1024, 3))
+
+  const { api } = await bootGui()
+  await api('add', { paths: [dir] })
+  const started = await api('start', { password: 'destroy-scan-pass' })
+  assert.equal(started.status, 200, started.text)
+
+  // ① 第二次 start 必须被拒：否则会有两个会话、两张证书，销毁只作用在后一个上
+  const second = await api('start', { password: 'another-pass' })
+  assert.equal(second.status, 500, '并发启动必须被拒绝')
+  assert.match(second.json.error, /已经在传输了/)
+
+  // ② 立刻点销毁（这一瞬间大概率还在扫描/哈希/装证书 —— S.live 还没就绪）
+  assert.equal((await api('destroy', {})).status, 200)
+
+  let st = null
+  for (let i = 0; i < 250; i++) {
+    await sleep(150)
+    st = (await api('state')).json
+    if (st.phase === 'destroyed' || st.phase === 'error') break
+  }
+  assert.equal(st.phase, 'destroyed',
+    `扫描阶段点的「立即销毁」也必须真的销毁（P1-2），实际停在 ${st.phase} —— 静默忽略就是这个毛病`)
+  assert.match(String(st.error?.title ?? ''), /销毁/, '要告诉用户"已按你的要求销毁"')
+  const done = st.report?.done ?? []
+  assert.ok(done.some((d) => /已清零/.test(d)), `销毁清单里应有密钥清零：${done.join(' / ')}`)
+
+  // ③ 销毁之后能重新开始（状态机没有卡死）
+  await api('reset', {})
+  assert.equal((await api('state')).json.phase, 'idle')
+})
+
+test('图形界面：不生效的选项要明确提示，不静默忽略（P2-9）', { timeout: 60000 }, async () => {
+  const gui = await startGui(['--port=8443', '--relay=https://relay.example', '--window=8', '--dry-run'])
+  cleanups.push(async () => { try { gui.child.kill() } catch { /* 已退出 */ } })
+  const err = gui.getErr()
+  assert.match(err, /图形界面下这些选项不生效/, `必须提示哪些选项没生效：\n${err}`)
+  for (const flag of ['--port', '--relay', '--window', '--dry-run']) {
+    assert.ok(err.includes(flag), `提示里要列出 ${flag}：\n${err}`)
+  }
+})
+
+test('图形界面入口：非法 --timeout 按用法错误退出（2），不是 NaN 透传（P1-3）', { timeout: 60000 }, () => {
+  const r = spawnSync(process.execPath, [CLI, '--timeout=abc'], {
+    encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, FLICKER_NO_BROWSER: '1' },
+  })
+  assert.equal(r.status, 2, `非法时长应当按用法错误退出（实际 ${r.status}）：${r.stderr}`)
+  assert.match(r.stderr, /看不懂的时长/)
+})
+
+test('图形界面：--timeout 走同一份解析并真的接到两条链路上（P1-3，结构判据）', async () => {
+  const guiSrc = await readFile(path.join(root, 'src', 'gui.js'), 'utf8')
+  assert.match(guiSrc, /timeoutMs: opts\.timeoutMs \?\? 10 \* 60 \* 1000/,
+    '发送要接入口解析好的毫秒值（不能再 Number(flags.timeout)）')
+  assert.match(guiSrc, /const timeoutMs = opts\.timeoutMs \?\? 30 \* 60 \* 1000/,
+    '接收模式要听 --timeout（从前写死 30 分钟）')
+  assert.ok(!/Number\(flags\.timeout\)/.test(guiSrc), '不能把 30m 交给 Number()（NaN）')
+  const binSrc = await readFile(path.join(root, 'bin', 'flicker.js'), 'utf8')
+  assert.match(binSrc, /guiTimeoutMs = parseDuration\(flags\.timeout/,
+    '入口要用共享的 parseDuration 解析后再交给界面')
+  const ttySrc = await readFile(path.join(root, 'src', 'tty.js'), 'utf8')
+  assert.match(ttySrc, /export function parseDuration\(/, '时长解析只有一份实现（tty.js 导出）')
+})
+
+test('runSend 的 --dry-run 早退也要卸掉信号监听（P3-11）', { timeout: 120000 }, async () => {
+  // 同一进程里多次调用 runSend（图形界面每场传输一次 / 集成测试）时，
+  // 早退路径不卸载信号监听会越积越多 —— MaxListenersExceededWarning，且 Ctrl+C 会
+  // 同时触发多个销毁器。这里连跑三次，看监听数有没有变。
+  const { installFromDisk } = await import('../src/assets.js')
+  installFromDisk(root)
+  const { runSend } = await import('../src/run.js')
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-dryrun-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'a.txt'), 'hi')
+  const sigs = process.platform === 'win32' ? ['SIGINT', 'SIGTERM'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
+  const before = sigs.map((s) => process.listenerCount(s))
+  for (let i = 0; i < 3; i++) {
+    const r = await runSend({
+      inputs: [path.join(dir, 'a.txt')], password: 'dry-run-pass', gift: false,
+      dryRun: true, installCert: false, noQr: true, noColor: true, machine: true,
+    })
+    assert.equal(r.dryRun, true)
+  }
+  assert.deepEqual(sigs.map((s) => process.listenerCount(s)), before,
+    'dry-run 早退路径没卸信号监听 —— 同进程多次调用会越积越多（P3-11）')
+})
+test('⭐ 图形界面：插件在第二场传输里仍然生效（P2-1，注册表不能是一次性的）',
+  { timeout: 180000 }, async () => {
+  // 注册表的 dispose() 会把订阅全 off 掉、apply() 也不允许跑第二遍，而界面进程
+  // 要比一场传输活得久（传完能「再传一次」）。从前界面把入口那份注册表直接交出去：
+  // 第一场结束后插件永久静默失效，而状态里还写着"已加载 N 个插件"。
+  const dir = await mkdtemp(path.join(tmpdir(), 'flicker-plugin-multi-'))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  const fired = path.join(dir, 'fired.txt')
+  const plugin = path.join(dir, 'multi-probe.cjs')
+  const pluginSrc = [
+    "const { appendFileSync } = require('node:fs')",
+    'module.exports = {',
+    "  name: 'multi-probe',",
+    '  apiVersion: 1,',
+    "  apply(ctx) { ctx.on('run/start', () => appendFileSync(" + JSON.stringify(fired) +
+    ", 'run/start' + String.fromCharCode(10))) },",
+    '}',
+  ].join(String.fromCharCode(10))
+  await writeFile(plugin, pluginSrc, 'utf8')
+  await writeFile(path.join(dir, 'a.txt'), 'hi')
+  const file = path.join(dir, 'a.txt')
+
+  const { api } = await bootGui([`--plugin=${plugin}`])
+  for (let round = 1; round <= 2; round++) {
+    await api('add', { paths: [file] })
+    assert.equal((await api('start', { password: `multi-round-${round}` })).status, 200)
+    await api('destroy', {})
+    let st = null
+    for (let i = 0; i < 250; i++) {
+      await sleep(150)
+      st = (await api('state')).json
+      if (st.phase === 'destroyed' || st.phase === 'error') break
+    }
+    assert.equal(st.phase, 'destroyed', `第 ${round} 场应当能被销毁（实际 ${st.phase}）`)
+    await api('reset', {})
+  }
+  const lines = (await readFile(fired, 'utf8')).split(String.fromCharCode(10)).filter(Boolean)
+  assert.equal(lines.length, 2,
+    `两场传输都要触发插件（旧行为：第二场起插件被 dispose 掉，只剩 1 条）：${JSON.stringify(lines)}`)
 })

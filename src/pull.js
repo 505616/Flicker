@@ -61,6 +61,39 @@ export class PullError extends Error {
 }
 
 /**
+ * 判断一次失败值不值得重试 —— 只重试**瞬时**故障。
+ *
+ * 思路与 `src/relay/core.js` 的 isTransientError 一致：网络抖动/超时/5xx/429 值得再试，
+ * 而密码错、令牌失效、数据校验失败重试一万次也不会变好，只会让用户白等。
+ * 这里不直接 import 那个函数，是因为本模块抛的是 `node:https` 原生错误
+ * （`e.code = ECONNRESET`）而不是 fetch 的 `TypeError`，判据要按实际错误形状写。
+ *
+ * @param {Error|null} e
+ * @param {number} [status] HTTP 状态码（只有状态码时也能判）
+ */
+const TRANSIENT_NET_CODES = new Set([
+  'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH',
+])
+
+export function isTransientPullError(e, status) {
+  // HTTP 层面：5xx / 429 值得重试。这条排在最前：调用方可能只拿状态码来问。
+  if (typeof status === 'number') return status >= 500 || status === 429
+  if (!e) return false
+  if (e.code === 'CANCELLED') return false                  // 用户点了「停止」
+  if (e.code === 'TIMEOUT') return true                     // 我们自己判的超时
+  if (TRANSIENT_NET_CODES.has(e.code)) return true
+  const cause = e?.cause?.code
+  return typeof cause === 'string' && TRANSIENT_NET_CODES.has(cause)
+}
+
+/** 第 attempt 次重试前等多久（0 = 第一次重试）：200ms 起翻倍，封顶 2s。 */
+export function pullRetryDelay(attempt) {
+  return Math.min(200 * 2 ** Math.max(0, attempt), 2000)
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
  * 解析对方给的链接。
  *
  * 只认**直连**那条路：`https://<地址>:<端口>/?k=<一次性令牌>`。
@@ -102,7 +135,9 @@ export function parseRecvLink(link) {
  * 为什么不用 `fetch`：这里需要"连上去之后**看一眼对端的证书**（DER）再决定"，
  * 以及把这条连接**钉死**（同一张证书）。`fetch` 拿不到 DER，也不给这个控制点。
  */
-function makeClient({ base, pinnedSha256 = null, timeoutMs = 60_000 }) {
+function makeClient({
+  base, pinnedSha256 = null, timeoutMs = 60_000, isAborted = () => false, onRetry = null,
+}) {
   // ⚠️ 只对 https 建 Agent：给 `http.request` 传一个 https.Agent 会直接抛错
   const agent = base.startsWith('https:')
     ? new HttpsAgent({ keepAlive: true, maxSockets: 1, rejectUnauthorized: false })
@@ -121,7 +156,10 @@ function makeClient({ base, pinnedSha256 = null, timeoutMs = 60_000 }) {
     }
   }
 
-  const request = function request(reqPath, { method = 'GET', json = null, body = null } = {}) {
+  /** 累计重试次数（供界面/结果报告"链路不稳，已自动重试 N 次"） */
+  let retryCount = 0
+
+  const requestOnce = function requestOnce(reqPath, { method = 'GET', json = null, body = null } = {}) {
     const url = new URL(base + reqPath)
     const doRequest = url.protocol === 'https:' ? httpsRequest : httpRequest
     return new Promise((resolve, reject) => {
@@ -148,9 +186,55 @@ function makeClient({ base, pinnedSha256 = null, timeoutMs = 60_000 }) {
       req.end()
     })
   }
+  /**
+   * 带**有限重试**的请求。
+   *
+   * 为什么必须重试：一次性令牌在第一步就被消费了，一次瞬时 ECONNRESET 之后
+   * 整个文件就永久失败、用户只能让对方重新发起（P1-15）。
+   * 但重试必须是**幂等**的，所以默认 0 次，只在明确安全的调用点打开：
+   *   · `/?k=` 页面加载 **0 次** —— 令牌一次性，重试可能把"其实已消费"变成假 410；
+   *   · `/api/auth/finish` **0 次** —— 挑战一次性（见 session.js），重放会失败；
+   *   · `/api/session`、`/api/auth/start`、`/api/manifest`、`/api/chunk` 最多 2 次。
+   * 重试只发生在**瞬时**错误上（isTransientPullError），校验失败/密码错一律不重试。
+   */
+  const request = async function request(reqPath, opts = {}) {
+    const retries = Number.isInteger(opts.retries) ? Math.max(0, opts.retries) : 0
+    let attempt = 0
+    for (;;) {
+      if (isAborted()) throw new PullError('已取消', 'CANCELLED')
+      let res
+      try {
+        res = await requestOnce(reqPath, opts)
+      } catch (e) {
+        if (attempt >= retries || !isTransientPullError(e)) throw e
+        retryCount++
+        const waitMs = pullRetryDelay(attempt)
+        onRetry?.({
+          attempt: attempt + 1, max: retries, waitMs,
+          code: e.code ?? e.name ?? 'NETWORK', message: e.message, reqPath,
+        })
+        await sleep(waitMs)
+        attempt++
+        continue
+      }
+      if (attempt < retries && isTransientPullError(null, res.status)) {
+        retryCount++
+        const waitMs = pullRetryDelay(attempt)
+        onRetry?.({
+          attempt: attempt + 1, max: retries, waitMs,
+          code: `HTTP_${res.status}`, message: `HTTP ${res.status}`, reqPath,
+        })
+        await sleep(waitMs)
+        attempt++
+        continue
+      }
+      return res
+    }
+  }
   // keep-alive 的连接必须显式关掉：否则 CLI 收完之后进程还挂着（socket 让它"有事可做"），
   // 用户在终端看到的就是"传完了但命令不返回"。2026-10 在 CI 上排查卡住时想到的这条。
   request.close = () => { try { agent?.destroy() } catch { /* 尽力而为 */ } }
+  Object.defineProperty(request, 'retryCount', { get: () => retryCount })
   return request
 }
 
@@ -188,14 +272,16 @@ export async function probePeer({ base, timeoutMs = 15_000 }) {
  */
 export async function openPullSession({ client, token, password, ui = null }) {
   // ① 消费一次性令牌（浏览器那条路是"打开页面"，这里是同一个动作的 HTTP 形态）
-  const page = await client(`/?k=${encodeURIComponent(token)}`)
+  // ⚠️ 这一步**绝不重试**：令牌一次性，若响应其实已经到达服务端、只是回程丢了，
+  //    重试只会拿到 410 TOKEN_USED，把一个可能还能继续的会话误判成"链接已用过"。
+  const page = await client(`/?k=${encodeURIComponent(token)}`, { retries: 0 })
   if (page.status === 410) throw new PullError('这个链接已经被用过了（一次性链接）', 'TOKEN_USED', 410)
   if (page.status !== 200) {
     throw new PullError(`打开链接失败：HTTP ${page.status}`, 'TOKEN_INVALID', page.status)
   }
 
   // ② 会话参数（盐 + 清单密文）
-  const info = await client(`/api/session?k=${encodeURIComponent(token)}`)
+  const info = await client(`/api/session?k=${encodeURIComponent(token)}`, { retries: 2 })
   if (info.status !== 200) {
     const e = safeJson(info)
     throw new PullError(e?.message ?? `取会话参数失败：HTTP ${info.status}`, e?.error ?? 'SESSION', info.status)
@@ -205,7 +291,8 @@ export async function openPullSession({ client, token, password, ui = null }) {
   const keys = deriveKeys(deriveVerifier(password, salt))
 
   // ③ 挑战
-  const start = await client(`/api/auth/start?k=${encodeURIComponent(token)}`, { method: 'POST' })
+  // 重试一次 /api/auth/start 是安全的：它只会换一个新挑战，而我们从响应里取的那一个才是有效的。
+  const start = await client(`/api/auth/start?k=${encodeURIComponent(token)}`, { method: 'POST', retries: 2 })
   if (start.status !== 200) throw new PullError(`取挑战失败：HTTP ${start.status}`, 'AUTH_START', start.status)
   const { challenge, macProfiles } = safeJson(start)
   const cbuf = Buffer.from(challenge, 'base64')
@@ -214,8 +301,9 @@ export async function openPullSession({ client, token, password, ui = null }) {
   const mac = receiverMac(keys.auth, cbuf, { profile }).toString('base64')
 
   // ④ 完成认证：我们证明知道密码，对方也必须证明
+  // ⚠️ finish 不重试：挑战是一次性的（session.js 用完即作废），重放同一份应答会失败。
   const fin = await client('/api/auth/finish', {
-    method: 'POST', json: { challenge, mac, macProfile: profile },
+    method: 'POST', json: { challenge, mac, macProfile: profile }, retries: 0,
   })
   const finBody = safeJson(fin)
   if (fin.status !== 200) {
@@ -231,7 +319,7 @@ export async function openPullSession({ client, token, password, ui = null }) {
   if (!sid) throw new PullError('对方没有给会话 ID（SID）', 'NO_SID')
 
   // ⑤ 清单：拿到的是密文，钥匙在我们手里
-  const mf = await client(`/api/manifest?sid=${encodeURIComponent(sid)}`)
+  const mf = await client(`/api/manifest?sid=${encodeURIComponent(sid)}`, { retries: 2 })
   if (mf.status !== 200) {
     throw new PullError(`取清单失败：HTTP ${mf.status}`, safeJson(mf)?.error ?? 'MANIFEST', mf.status)
   }
@@ -271,6 +359,14 @@ export function checkManifestPaths(wire) {
         `清单里有两个路径会落到同一个文件：${seen.get(key)} 与 ${rel} —— ` +
         '继续写会静默覆盖掉一个，已停止（一个字节都没有写入）', 'E_MANIFEST_DUPLICATE_PATH')
     }
+    // P3-3：sha256 是**必填**（PROTOCOL §7 的完成判据）。旧代码在 pullFile 里写
+    // `if (file.sha256)` —— 缺字段就默默跳过整文件校验直接 rename 定稿。
+    // 这里在**写任何字节之前**整场拒绝，别让"没有校验"伪装成"校验通过"。
+    if (typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(f.sha256)) {
+      throw new PullError(
+        `清单里的「${rel}」缺少有效的 sha256 —— 无法做整文件校验，已拒绝整场传输（一个字节都没有写入）`,
+        'E_MANIFEST_UNVERIFIABLE')
+    }
     seen.set(key, rel)
     out.push({ ...f, rel })
   }
@@ -307,7 +403,9 @@ async function pullFile({ client, sid, keys, file, fi, dir, taken, ui, onBytes, 
     for (let ci = 0; ci < file.chunks; ci++) {
       if (signal?.aborted) throw new PullError('已取消', 'CANCELLED')
       const seq = (Number.isInteger(file.firstChunk) ? file.firstChunk : 0) + ci
-      const r = await client(`/api/chunk?seq=${seq}&sid=${encodeURIComponent(sid)}`)
+      // 分块 GET 是幂等的（不消费任何一次性状态），瞬时错误重试 2 次：
+      // 旧实现一次 ECONNRESET 就把整个文件判死，而令牌已经消费、无法从头再来。
+      const r = await client(`/api/chunk?seq=${seq}&sid=${encodeURIComponent(sid)}`, { retries: 2 })
       if (r.status !== 200) {
         const e = safeJson(r)
         throw new PullError(
@@ -373,7 +471,8 @@ async function existsOnDisk(dir, rel) {
  * @param {(info:object)=>void} [o.onFile] 每个文件结束时回调
  * @param {(info:object)=>void} [o.onManifest] 清单解密后回调一次（界面拿它显示"共 N 个文件"）
  * @param {AbortSignal} [o.signal] 取消信号（图形界面的「停止」按钮用）
- * @returns {Promise<{ok:boolean, dir:string, files:object[], failed:object[], bytes:number}>}
+ * @returns {Promise<{ok:boolean, dir:string, files:object[], failed:object[], bytes:number,
+ *   retries:number}>} `failed` 非空时**不会** POST /api/done（保留会话给用户重试）。
  */
 export async function pullFromLink(o = {}) {
   const { link, password, dir: outDir, signal = null } = o
@@ -388,7 +487,15 @@ export async function pullFromLink(o = {}) {
     throw new PullError(parsed.reason, parsed.kind === 'relay' ? 'RELAY_LINK' : 'BAD_LINK')
   }
 
-  const client = makeClient({ base: parsed.base, pinnedSha256: o.pinnedSha256 ?? null })
+  const client = makeClient({
+    base: parsed.base,
+    pinnedSha256: o.pinnedSha256 ?? null,
+    isAborted: aborted,
+    // 「链路抖了一下」要让用户看见，否则重试期间界面像是卡住了。
+    onRetry: ({ attempt, max, code }) => {
+      ui?.warn?.(`链路抖了一下，正在自动重试（${attempt}/${max}，${code}）`)
+    },
+  })
   // 取消时立刻把连接关掉：否则"正在等一块"的请求会一直挂着，「停止」要等好几秒才生效
   if (signal) signal.addEventListener('abort', () => client.close?.(), { once: true })
   const ensureLive = () => {
@@ -399,7 +506,16 @@ export async function pullFromLink(o = {}) {
   const { sid, keys, wire, profile } = await openPullSession({
     client, token: parsed.token, password, ui,
   })
-  const files = checkManifestPaths(wire)
+  let files
+  try {
+    files = checkManifestPaths(wire)
+  } catch (e) {
+    // 清单阶段就拒绝时还没进入下面的大 try/finally；必须在这里清密钥并关连接，
+    // 否则 keep-alive socket 会让进程挂着（CLI 表现为"已经报错了但命令不返回"）。
+    wipe(keys.enc, keys.auth, keys.room)
+    client.close?.()
+    throw e
+  }
   o.onManifest?.({
     files: files.length,
     totalBytes: files.reduce((a, f) => a + Number(f.size || 0), 0),
@@ -434,17 +550,34 @@ export async function pullFromLink(o = {}) {
       }
     }
 
-    // 告诉对方"收完了" → 发送端据此销毁（它不会自己先销毁，这是协议里的完成判据）
-    const fin = await client(`/api/done?sid=${encodeURIComponent(sid)}`, { method: 'POST' })
-    if (fin.status !== 200) {
-      ui?.warn?.(`通知对方"已完成"时收到 HTTP ${fin.status}（不影响本地文件，对方可能会多等一会儿）`)
+    // ⚠️ 用户点了「停止」时必须**抛 CANCELLED**，而不是带着 failed 列表正常返回。
+    //    否则上层（GUI）会把"中途取消"显示成"接收完成（有失败）" —— 状态语义就错了。
+    //    已收下的文件与 .flicker-part 半成品仍然保留在磁盘上（由 pullFile 的 catch 决定）。
+    ensureLive()
+
+    // 告诉对方"收完了" → 发送端据此销毁（它不会自己先销毁，这是协议里的完成判据）。
+    //
+    // ⚠️ P1-15：**只有零文件失败才发**。有失败还发 /api/done，等于亲手烧掉重试机会 ——
+    //    一次性令牌已消费、发送端收到完成就销毁会话，用户只剩"让对方重新发起"这一条路。
+    //    失败时保留会话，至少还能用同一个链接/密码再试一次。
+    if (failed.length === 0) {
+      const fin = await client(`/api/done?sid=${encodeURIComponent(sid)}`, { method: 'POST' })
+      if (fin.status !== 200) {
+        ui?.warn?.(`通知对方"已完成"时收到 HTTP ${fin.status}（不影响本地文件，对方可能会多等一会儿）`)
+      }
+    } else {
+      ui?.warn?.(`有 ${failed.length} 个文件失败 —— 没有通知对方"完成"（会话保留，便于重试）`)
     }
   } finally {
     wipe(keys?.enc, keys?.auth, keys?.room)
     client.close?.()
   }
 
-  return { ok: failed.length === 0, dir: outDir, files: done, failed, bytes: totalBytes }
+  return {
+    ok: failed.length === 0, dir: outDir, files: done, failed, bytes: totalBytes,
+    // 把重试状态报出来：用户/界面能知道"这次成功是重试扛过来的"，排查链路问题时有用。
+    retries: client.retryCount,
+  }
 }
 
 /** 解析响应体里的 JSON（解析不了就返回 null，绝不抛错） */

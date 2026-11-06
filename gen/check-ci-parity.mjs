@@ -68,16 +68,38 @@ export function checkCommands(pkgScript) {
  *
  * ⚠️ 只认 `node <脚本>` 形状：CI 里还有 `npm install`、`node --version`、
  *    `node gen/test-plan.mjs`（只预览，不是判据）之类的步骤，它们不该被当成"判据"。
+ *
+ * ── 两种 YAML 写法都要认（2026-11 修）──
+ *   · 单行：`run: node gen/x.mjs --check`
+ *   · 块式：`run: |` 下面缩进更深的每一行都是一条命令
+ * 从前注释写着"也支持 `run: |`"，正则却用 `(?!\|)` 把它显式排除了 ——
+ * 于是有人把判据写成多行，这条 parity 会直接判"CI 里没有"，报错方向还是反的。
+ * 现在块式是真的解析的；`run: >`（YAML 折叠式）仍然不支持：它会把多行**折叠成一条**，
+ * 语义与"多条命令"不同，本仓库也不使用 —— 这一点如实写在函数里，而不是假装支持。
  */
 export function ciCommands(ciText) {
   const out = []
-  for (const line of ciText.split('\n')) {
-    // `- name: …` 之后的 `run: …` 是单行形式；也支持 `run: |` 里的逐行命令
-    const m = line.match(/^\s*(?:-\s*)?run:\s*(?!\|)(.+)$/)
-    if (!m) continue
-    const cmd = normalize(m[1])
-    if (!/^["']?[\w./-]+\.(?:mjs|cjs|js)\b/.test(cmd)) continue
-    out.push(cmd)
+  const lines = ciText.split('\n')
+  const push = (raw) => {
+    const cmd = normalize(raw)
+    if (/^["']?[\w./-]+\.(?:mjs|cjs|js)\b/.test(cmd)) out.push(cmd)
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    // 单行形式
+    const one = line.match(/^\s*(?:-\s*)?run:\s*(.+)$/)
+    if (one && !/^[|>][+-]?\s*$/.test(one[1])) { push(one[1]); continue }
+    // 块式：run: | 后缩进更深的内容（跳过空行与 YAML 注释）
+    if (!/^\s*(?:-\s*)?run:\s*\|[+-]?\s*$/.test(line)) continue
+    const baseIndent = line.match(/^ */)[0].length
+    for (let j = i + 1; j < lines.length; j++) {
+      const body = lines[j]
+      if (!body.trim()) continue
+      if (body.match(/^ */)[0].length <= baseIndent) break
+      const cmd = body.trim()
+      if (cmd.startsWith('#')) continue
+      push(cmd)
+    }
   }
   return out
 }

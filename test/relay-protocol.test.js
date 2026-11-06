@@ -82,7 +82,7 @@ test('/send 返回网页发送端（与接收页对称）', async () => {
   assert.equal(r.status, 200)
   assert.match(await r.text(), /发送页/)
   assert.match(r.headers.get('content-type') ?? '', /text\/html/)
-  assert.equal(r.headers.get('cache-control'), 'no-store', '页面不该被缓存（换版本后要立刻生效）')
+  assert.match(r.headers.get('cache-control') ?? '', /no-store/, '页面不该被缓存（换版本后要立刻生效）')
 })
 
 test('/send 没配置时返回 501 并说清怎么办（不假装能发）', async () => {
@@ -270,6 +270,108 @@ test('销毁房间后立刻不可用', async () => {
   await call('POST', `/r/${rid}?seq=0`, new Uint8Array([1]))
   assert.equal((await (await call('DELETE', `/r/${rid}`, )).json()).destroyed, true)
   assert.equal((await call('GET', `/r/${rid}/status`, )).status, 404)
+})
+
+
+
+// ── CSP：中继托管页面必须补上安全响应头（报告：中继页没有 CSP）──
+
+test('接收页 / 发送页都带 CSP 与反嗅探头（XSS 时至少堵死外发）', async () => {
+  const send = await handleRelay(new Request(BASE + '/send'), '/send', store, {
+    senderHtml: async () => '<!doctype html><script>1</script>',
+  })
+  const home = await handleRelay(new Request(BASE + '/'), '/', store, {
+    pageHtml: async () => '<!doctype html><script>1</script>',
+  })
+  for (const [label, r] of [['/send', send], ['/', home]]) {
+    const csp = r.headers.get('content-security-policy') ?? ''
+    assert.match(csp, /default-src 'none'/, `${label}: 必须有默认拒绝策略`)
+    assert.match(csp, /script-src 'unsafe-inline'/, `${label}: 页面是内联脚本，必须允许 inline（CSP 是第二道闸）`)
+    assert.match(csp, /connect-src 'self'/, `${label}: 只许连自己的中继`)
+    assert.match(csp, /worker-src blob:/, `${label}: 接收页的摘要 Worker 用 Blob 建，缺了会退回主线程`)
+    assert.match(csp, /frame-ancestors 'none'/, `${label}: 不许被任何站点套 iframe（点击劫持）`)
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff')
+    assert.equal(r.headers.get('referrer-policy'), 'no-referrer')
+    assert.match(r.headers.get('cache-control') ?? '', /no-store/, `${label}: 页面不该被缓存`)
+  }
+})
+
+// ── 非法 seq 不能被当成"创建房间"（P3-2）──────────────────────
+
+test('POST ?seq=abc 必须 400，不能静默当成创建房间并把消息丢掉', async () => {
+  const { rid } = newRoom('bad-seq')
+  const r = await call('POST', `/r/${rid}?seq=abc`, new Uint8Array([1, 2, 3]))
+  assert.equal(r.status, 400)
+  assert.equal((await r.json()).error, 'BAD_SEQ')
+  assert.equal(store.stats().rooms === 0 || !store.rooms.has(rid), true,
+    '非法 seq 不该顺手创建出房间（旧行为会创建并返回 200）')
+  // 空参数、小数、负号、十六进制同样拒绝
+  for (const q of ['?seq=', '?seq=1.5', '?seq=-1', '?seq=0x10', '?seq=%20']) {
+    const bad = await call('POST', `/r/${rid}${q}`, new Uint8Array([1]))
+    assert.equal(bad.status, 400, `${q} 应 400`)
+  }
+  // 不写 seq 才是创建
+  assert.equal((await call('POST', `/r/${rid}`)).status, 200)
+})
+
+// ── 请求体上限在**读之前**生效（P1-3）──────────────────────────
+
+test('Content-Length 超限的 /batch 与单条 POST 在读取请求体之前就 413', async () => {
+  const limit = store.maxMessageBytes
+  // 造一个"一读就会失败"的假 Request：只要 arrayBuffer 被调用就说明先读了内存
+  const fake = (path, contentLength) => {
+    let reads = 0
+    return {
+      get reads() { return reads },
+      request: {
+        url: BASE + path,
+        method: 'POST',
+        headers: new Headers({ 'content-length': String(contentLength) }),
+        arrayBuffer: async () => { reads++; throw new Error('不该读请求体') },
+      },
+    }
+  }
+
+  const batch = fake('/r/' + 'e'.repeat(64) + '/batch', 64 * limit + 4 * 64 + 1)
+  const r1 = await handleRelay(batch.request, '/r/' + 'e'.repeat(64) + '/batch', store)
+  assert.equal(r1.status, 413, '超过 /batch 上限必须 413')
+  assert.equal((await r1.json()).error, 'TOO_LARGE')
+  assert.equal(batch.reads, 0, 'Content-Length 已经说明超限，不该把请求体读进内存')
+
+  const single = fake('/r/' + 'e'.repeat(64) + '?seq=0', limit + 1)
+  const r2 = await handleRelay(single.request, '/r/' + 'e'.repeat(64), store)
+  assert.equal(r2.status, 413, '超过单条上限必须 413')
+  assert.equal(single.reads, 0, '单条 POST 也必须先看 Content-Length')
+})
+
+// ── 清单分帧（P1-2）：发送端/接收端共用的线格式 ──────────────
+
+test('清单分帧：头 8 字节 = BE32(i)||BE32(partCount)，拼回后与 M 逐字节一致', async () => {
+  const { packManifestParts, MAX_MANIFEST_PARTS } = await import('../src/relay/protocol.js')
+  // 造一个 3 段的 M：每条上限 8 + 4 = 12 → partSize = 4
+  const M = new Uint8Array(10).map((_, i) => i + 1)
+  const parts = packManifestParts(M, 12)
+  assert.equal(parts.length, 3, 'partSize=4、M=10 字节 → 3 段')
+  const rebuilt = new Uint8Array(M.length)
+  let off = 0
+  for (let i = 0; i < parts.length; i++) {
+    const dv = new DataView(parts[i].buffer)
+    assert.equal(dv.getUint32(0), i, '第 i 段的头必须是 BE32(i)')
+    assert.equal(dv.getUint32(4), parts.length, '头里必须带 partCount（接收端先取 seq=0 读它）')
+    assert.ok(parts[i].length <= 12, '每段都不得超过中继声明的单条上限')
+    const body = parts[i].subarray(8)
+    rebuilt.set(body, off); off += body.length
+  }
+  assert.deepEqual(Buffer.from(rebuilt), Buffer.from(M), '拼回来必须与 M 逐字节一致（含类型字节）')
+  // 单段也必须带 8 字节头 —— 接收端只处理一种格式
+  const one = packManifestParts(new Uint8Array([1, 2, 3]), 1024)
+  assert.equal(one.length, 1)
+  assert.equal(new DataView(one[0].buffer).getUint32(4), 1)
+  assert.deepEqual(Buffer.from(one[0].subarray(8)), Buffer.from([1, 2, 3]))
+  // 上限：超过 1024 段必须明确报错，而不是无限分
+  assert.equal(MAX_MANIFEST_PARTS, 1024)
+  assert.throws(() => packManifestParts(new Uint8Array(1024 * 8 + 1), 9),
+    (e) => e.code === 'MANIFEST_TOO_LARGE' && e.status === 413)
 })
 
 // ── 消息封装 ────────────────────────────────────────────────

@@ -31,8 +31,14 @@ export class Destroyer {
 
   /**
    * 注册一个销毁步骤。
+   *
+   * ⚠️ 三态约定（P2-2 踩过）：返回 `false` / `undefined` / `null` = **不适用**（清单记 –）；
+   *    动作**执行了但没成功**必须 **throw**（清单记 ✗；声明了 `optional` 的记 –）。
+   *    所以像"删除证书失败"这种结果**绝不能** `return false` —— 那会被显示成
+   *    "不适用"，用户以为已经清理干净，而 Root 库里的会话 CA 其实还在。
+   *
    * @param {string} label 人类可读的动作名（会显示在销毁清单里）
-   * @param {() => any} fn 实际动作；返回 falsy 视为"不适用"
+   * @param {() => any} fn 实际动作
    * @param {object} [opts]
    * @param {boolean} [opts.optional] 失败是否可接受（例如证书本来就没装）
    */
@@ -60,6 +66,8 @@ export class Destroyer {
     for (const s of this.steps) {
       try {
         const r = await s.fn()
+        // false/undefined/null 一律按"不适用"（三态约定见 step()）：
+        // "失败"只能通过 throw 表达，这样清单里的 – 与 ✗ 不会混在一起。
         if (r === false || r === undefined || r === null) skipped.push(s.label)
         else { done.push(s.label); this.log(`  ✓ ${s.label}`) }
       } catch (e) {

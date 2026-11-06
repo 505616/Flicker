@@ -101,6 +101,10 @@ export async function runSend(opts) {
       //    漏掉这一步等于"干跑一次留下一个插件资源"。
       destroyer.step('插件资源已释放', () => (plugins ? plugins.asDestroyStep() : false))
       await destroyer.run()
+      // ⚠️ 早退也要卸掉信号监听：这个函数在同一进程里可能被调用多次
+      //    （图形界面每场传输一次、集成测试一次），漏掉就是 SIGINT/SIGTERM 监听越积越多
+      //    —— 触发 MaxListenersExceededWarning，Ctrl+C 时还会同时跑多个销毁器。
+      signals.uninstall()
       return { dryRun: true }
     }
 
@@ -188,6 +192,12 @@ export async function runSend(opts) {
       salt, verifier,
       encManifest: enc.ct, manifestIv: enc.iv, manifestTag: enc.tag,
       onEvent: (evt) => {
+        // 图形界面（以及任何未来的前端）也订阅同一批事件。
+        // ⚠️ 从前这里只调 ui.*，入口传进来的 `opts.onEvent` 被整个丢掉了 ——
+        //    GUI 的 S.progress / S.phase 因此永远不更新，界面一直停在"等待对方连接"。
+        //    放在最前面是因为界面状态比终端渲染更及时；try/catch 兜住是因为
+        //    它属于**视图层** —— 渲染出错不该让传输失败，更不能让密钥忘了清。
+        try { opts.onEvent?.(evt) } catch (e) { ui.warn(`界面事件处理出错：${e?.message ?? e}`) }
         if (evt.type === 'peer-connected') ui.peerConnected(evt.peer)
         else if (evt.type === 'authed') {
           ui.authed(evt.peer)
@@ -208,6 +218,13 @@ export async function runSend(opts) {
     server = new TransferServer({
       session, manifest: prep.serverManifest, receiverHtml: html,
       limiter: opts.limiter ?? null,
+      // ⚠️ 传输进度事件（chunk）也必须走 Session 的同一个分发器。
+      //    这条线从前**根本没接**（构造函数的 onEvent 没给）→ `_sendChunk` 在
+      //    响应之后调用 undefined 抛 TypeError：终端进度条与 GUI 的 S.progress
+      //    都永远不动。它和 P1-1（opts.onEvent 被丢弃）是同一类"事件到不了前端"。
+      //    用 `(evt) => session.onEvent(evt)` 而不是直接传闭包：后面
+      //    waitForCompletion 会替换 session.onEvent，动态取才能拿到最新那个。
+      onEvent: (evt) => session.onEvent(evt),
     })
 
     /**

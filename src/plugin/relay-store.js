@@ -26,6 +26,12 @@ import { SLOTS } from './events.js'
  *
  * 刻意**只列协议真正用到的**：多列一个方法就等于要求插件多写一段死代码，
  * 而少列一个的表现是运行时 `undefined is not a function`。
+ *
+ * 可选成员（不在下表里，协议层会做降级）：
+ *   · `sweep()` —— 清理过期房间；没有就由插件自己负责（协议只在本方法存在时调）。
+ *   · `maxMessageBytes` —— 单条上限；缺失时回落到 `DEFAULT_MAX_MESSAGE_BYTES`，
+ *     而不是让读取上限变成 undefined（那等于没有上限）。
+ *   · 字节配额 —— 内置 RoomStore 自己强制；插件存储若把数据放到别处，要自己做等价限额。
  */
 export const STORE_METHODS = Object.freeze([
   'create',    // (id) → {created, messages}

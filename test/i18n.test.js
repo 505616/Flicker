@@ -22,6 +22,8 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { STRINGS } from '../web/i18n-strings.mjs'
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PAGES = ['web/receiver.html', 'web/station.html'].map((p) => path.join(ROOT, p))
 const html = Object.fromEntries(
@@ -198,6 +200,46 @@ test('⭐ i18n：占位符在两种语言里必须**一一对应**', () => {
   }
   assert.deepEqual(bad, [],
     '占位符必须两边一致，否则另一种语言会显示字面的 {xxx}：\n  ' + bad.join('\n  '))
+})
+
+test('⭐ i18n：文案**源表**里中英键集合与占位符完全一致（新增文案的守门）', () => {
+  // 页面里内联的那张表是生成物（Lead 集成时重建）；而 i18n-strings.mjs 是**源**。
+  // 这条直接从源表验，所以新增文案不会因为"还没重建生成物"而漏检。
+  const names = (s) => [...String(s).matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(',')
+  const zhKeys = Object.keys(STRINGS.zh)
+  const enKeys = Object.keys(STRINGS.en)
+  assert.deepEqual(zhKeys.filter((k) => !(k in STRINGS.en)), [], '英文表缺这些键')
+  assert.deepEqual(enKeys.filter((k) => !(k in STRINGS.zh)), [], '中文表缺这些键')
+  const bad = []
+  for (const k of zhKeys) {
+    if (names(STRINGS.zh[k]) !== names(STRINGS.en[k])) {
+      bad.push(`${k}: 中文 {${names(STRINGS.zh[k])}} vs 英文 {${names(STRINGS.en[k])}}`)
+    }
+  }
+  assert.deepEqual(bad, [], '占位符必须两边一一对应：\n  ' + bad.join('\n  '))
+})
+
+test('⭐ i18n：本轮修复新增的文案在两边的表里都在', () => {
+  // 这些键由页面代码里的 t() 使用（不是 data-i18n 属性），所以上面的
+  // "HTML 键都存在" 那条覆盖不到它们 —— 必须单独钉一遍。
+  const added = [
+    'recv.go.dirFallbackWarn',          // P2-6 目录写盘失败告警
+    'recv.msg.badManifestParts',        // P1-2 分帧条数异常
+    'recv.msg.skipExisting',            // P1-2 同名冲突里选"跳过"
+    'recv.msg.tooManyDupes',            // P1-2 换名时同名文件太多
+    'recv.err.DECRYPT_MANIFEST.t',      // P1-4 清单解不开
+    'recv.err.DECRYPT_MANIFEST.m',
+    'phone.pick.locked',                // P1-3 / P2-1 名单已发，选择集冻结
+    'phone.pick.skippedSome',           // 选文件时跳过不合法名字
+    'phone.go.recovering',              // P2-2 非幂等请求失败后探状态
+    'phone.err.MANIFEST_CHANGED.t',     // P2-1 快照缺失（防御）
+    'phone.err.MANIFEST_CHANGED.m',
+  ]
+  for (const key of added) {
+    assert.ok(key in STRINGS.zh, `中文表缺 ${key}`)
+    assert.ok(key in STRINGS.en, `英文表缺 ${key}`)
+    assert.ok(String(STRINGS.zh[key]).trim() && String(STRINGS.en[key]).trim(), `${key} 不能为空`)
+  }
 })
 
 test('i18n：HTML 里引用的每个键都存在于表中', () => {

@@ -15,11 +15,11 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Session, MAX_AUTH_FAILURES, PHASE } from '../src/session.js'
-import { PARAMS } from '../src/suite/flicker1.js'
+import { Session, SessionError, MAX_AUTH_FAILURES, PHASE, errorBody } from '../src/session.js'
+import { PARAMS, receiverMac } from '../src/suite/flicker1.js'
 import { randomBytes } from 'node:crypto'
 
-function makeSession() {
+function makeSession(extra = {}) {
   const events = []
   const session = new Session({
     password: 'the-right-password',
@@ -28,8 +28,18 @@ function makeSession() {
     manifestIv: Buffer.alloc(12),
     manifestTag: Buffer.alloc(16),
     onEvent: (e) => events.push(e),
+    ...extra,
   })
   return { session, events }
+}
+
+/** 走一次**正确密码**的完整握手，返回挑战/应答，供重放类用例复用 */
+function authSuccessfully(session) {
+  const { challenge, macProfiles } = session.startAuth()
+  const cbuf = Buffer.from(challenge, 'base64')
+  const mac = receiverMac(session.keys.auth, cbuf, { profile: 'v2' }).toString('base64')
+  const outcome = session.finishAuth({ challenge, mac, macProfile: 'v2' })
+  return { challenge, mac, cbuf, macProfiles, outcome }
 }
 
 /** 走一次"密码不对"的认证，返回抛出的错误码 */
@@ -144,4 +154,81 @@ test('挑战不匹配也计入失败次数（防止用重放来绕过计数）',
   assert.equal(session.failures, 1,
     '挑战不匹配也必须计数 —— 否则攻击者可以拿它反复试探而不触发上限')
   void challenge
+})
+
+// ── P2-1：challenge 一次性 / READY 后不能回退 / 失败退避 ─────────
+
+test('⭐ P2-1：同一份 {challenge,mac} 不能重放换第二个 SID', () => {
+  const { session } = makeSession()
+  const first = authSuccessfully(session)
+  assert.equal(session.phase, PHASE.READY, '（前提）握手应当成功')
+  const sid1 = first.outcome.sid
+  assert.equal(session.challenge, null, '成功后挑战必须立刻作废（不能留着被重放）')
+
+  // 重放同一份应答：不许再生成新 SID，也不许把已认证状态改乱
+  assert.throws(() => session.finishAuth({
+    challenge: first.challenge, mac: first.mac, macProfile: 'v2',
+  }), (e) => {
+    assert.ok(e instanceof SessionError)
+    assert.equal(e.code, 'NOT_AUTHED', '重复提交必须被拒（而不是又发一个新 SID）')
+    return true
+  })
+  assert.equal(session.sid, sid1, '重放不能换掉（更不能换出第二个）SID')
+  assert.equal(session.phase, PHASE.READY, '重放不能把已认证会话打回 AUTH')
+  assert.equal(session.failures, 0, '合法客户端没做错事，不该被记一次密码失败')
+})
+
+test('⭐ P2-1：READY 之后 startAuth 不能把状态打回 AUTH（防局域网 DoS）', () => {
+  const { session } = makeSession()
+  authSuccessfully(session)
+  const sid = session.sid
+  assert.throws(() => session.startAuth(), (e) => {
+    assert.ok(e instanceof SessionError)
+    assert.equal(e.code, 'ALREADY_AUTHED')
+    assert.equal(errorBody(e).status, 409, '这是"状态冲突"，不是认证失败')
+    return true
+  })
+  assert.equal(session.phase, PHASE.READY, '状态必须保持 READY')
+  assert.equal(session.challenge, null, '不能顺手又把挑战换掉')
+  assert.doesNotThrow(() => session.requireSid(sid),
+    '已认证的合法 SID 必须继续有效 —— 旧实现会被未认证方一个 startAuth 打回 NOT_AUTHED')
+})
+
+test('⭐ P2-1：失败退避按 1/2/4/8s 递增（睡眠可注入，测试不真等）', async () => {
+  const waits = []
+  const { session } = makeSession({
+    sleep: async (ms) => { waits.push(ms) },
+  })
+
+  for (let i = 1; i <= 4; i++) {
+    assert.equal(attemptWrongPassword(session), 'BAD_PASSWORD', `第 ${i} 次错密码应被拒`)
+    const ms = await session.applyFailureBackoff()
+    assert.equal(ms, [1000, 2000, 4000, 8000][i - 1],
+      `第 ${i} 次失败后应退避 1/2/4/8s 序列中的对应值`)
+  }
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000], '实际等待序列必须与文档 §4.6 一致')
+
+  // 第 5 次失败即销毁；退避仍应封顶 8000，不因销毁而消失
+  assert.equal(attemptWrongPassword(session), 'BAD_PASSWORD')
+  assert.equal(session.destroyed, true)
+  assert.equal(await session.applyFailureBackoff(), 8000)
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000, 8000], '上限就是 8 秒（不是继续翻倍）')
+
+  // 对照：一次失败都没有时不需要退避
+  const { session: fresh } = makeSession()
+  assert.equal(await fresh.applyFailureBackoff(), 0)
+})
+
+// ── P3-2：销毁后 consumeToken 不能抛 TypeError ─────────────────
+
+test('⭐ P3-2：destroy() 之后 consumeToken 报 DESTROYED(410)，而不是 TypeError', () => {
+  const { session } = makeSession()
+  session.destroy()
+  assert.equal(session.token, null, '（前提）销毁会清掉 token —— 旧代码正是在这之后读 token.length')
+  assert.throws(() => session.consumeToken('whatever'), (e) => {
+    assert.ok(e instanceof SessionError, `应当是 SessionError，实际 ${e?.name}: ${e?.message}`)
+    assert.equal(e.code, 'DESTROYED')
+    assert.equal(errorBody(e).status, 410, '销毁后打开链接应当是"会话已销毁"(410)')
+    return true
+  })
 })

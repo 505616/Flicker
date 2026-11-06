@@ -204,7 +204,7 @@ The other person has to type the password by hand on another computer, character
 
 **2. Generate a strong password by default, instead of letting the user think one up**
 A 4-word password like `correct-horse-battery-staple`:
-- About 52 bits of entropy — plenty for a session that lives a few minutes (and there is a rate limit + automatic destruction after 5 failures)
+- **About 32 bits** if every word carries 8 bits (4 words; the word list is `WORDS` in `src/suite/flicker1.js`). That is not "unguessable" against an offline attacker —— see `SECURITY.md` §4.2/§5.6 for the arithmetic —— but the password is only valid for a few minutes, the link is one-time, and five failures destroy the session
 - **Readable, sayable and typeable by a human** — the user can read it out over the phone, or send it over WeChat
 - A reminder: the default password can be accepted with a plain Enter; type your own if you want to set one
 

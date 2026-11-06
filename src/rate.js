@@ -38,6 +38,8 @@ export class RateLimiter {
     this._last = this._now()
     /** 累计因为限速而等待的毫秒数（用于告诉用户"限速生效中"） */
     this.waitedMs = 0
+    /** take 的串行队列尾节点（P2-4：并发调用不能各自偷令牌） */
+    this._chain = Promise.resolve()
   }
 
   /** 按经过的时间补充令牌 */
@@ -74,6 +76,28 @@ export class RateLimiter {
   async take(n, isAborted) {
     if (!this.enabled || !(n > 0)) return
 
+    // ⚠️ 并发调用必须**串行扣减**（P2-4）。旧实现让每个等待者用**同一份** tokens
+    //    并行 sleep，醒来后各自 `_refill()` + `tokens -= n` —— 于是多个请求会同时
+    //    "偷"到同一段新生成的令牌：3 个并发 take(1000)、速率 1000 B/s，实测只花了
+    //    约 1 秒（等价于串行 2 秒的额度被一次放完），限速形同虚设。
+    //
+    //    这里用一个 promise 链把 take 排成队（FIFO，先到先得）：前一个请求的
+    //    等待与扣减结束后，后一个才重新读 tokens。行为与"串行调用 take"完全一致，
+    //    而且仍然按分数段 sleep —— 取消在中途依然能立刻生效。
+    let release
+    const gate = new Promise((r) => { release = r })
+    const prev = this._chain
+    this._chain = gate
+    await prev
+    try {
+      return await this._take(n, isAborted)
+    } finally {
+      release()
+    }
+  }
+
+  /** take 的实际扣减逻辑。**只允许从 take 的串行队列里调用。** */
+  async _take(n, isAborted) {
     // 桶装不下这个请求就把它长大（见"坑二"）。长大时按比例补上已有额度，
     // 这样不会凭空多送也不会有未记账的令牌残留。
     if (n > this.capacity) {

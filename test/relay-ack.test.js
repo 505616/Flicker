@@ -114,7 +114,6 @@ async function transfer({ ackMode, idleTimeoutMs = 4000 }) {
   const files = wire.files.map((f, i) => ({
     ...f, index: i, firstChunk: 0, absPath: m.files[i].absPath, _bytes: null, _gift: false,
   }))
-  const total = 1 + wire.totalChunks
   const url = (s = '') => `${relay.base}/r/${roomName}${s}`
 
   const sender = new RelaySender({
@@ -123,6 +122,20 @@ async function transfer({ ackMode, idleTimeoutMs = 4000 }) {
     pollMs: 10, windowSize: 8,
   })
   await sender.start()
+
+  // 清单分帧（2026-10）：seq 0..partCount-1 是清单分片，
+  // 数据块 g 的消息序号是 partCount + g。先从 seq=0 的分片头读出 partCount ——
+  // 不能写死 1（那正是旧实现的形状，而模拟"写得像旧版"等于没模拟新协议）。
+  let manifestParts = 1
+  {
+    const r = await fetch(url('?seq=0'))
+    assert.equal(r.status, 200, '清单 seq=0 应当已经投出去')
+    const first = new Uint8Array(await r.arrayBuffer())
+    assert.ok(first.length >= 8, '清单分片至少要有 8 字节头')
+    manifestParts = new DataView(first.buffer, first.byteOffset, first.byteLength).getUint32(4)
+    assert.ok(manifestParts >= 1)
+  }
+  const total = manifestParts + wire.totalChunks
 
   // 页面那套：后台合并 ack
   let ackedSeq = -1, lastSent = -1, sending = false
@@ -143,13 +156,12 @@ async function transfer({ ackMode, idleTimeoutMs = 4000 }) {
 
   let received = 0
   const receiver = (async () => {
-    // ⚠️ 顺序要与页面**完全一致**：清单占 seq 0，所以取块是 `1 + chunkSeq`、
-    //    ack 也是 `1 + chunkSeq`。
-    //    第一版这里按"消息序号"从 0 开始循环，看起来等价，实际掩盖了页面里的
-    //    一个 off-by-one（页面取块用了 1+i、ack 却用了 i）—— 于是这个用例绿着，
-    //    而真实浏览器里发送端永远等不到完成。**模拟得不像，等于没模拟。**
-    for (let chunkSeq = 0; chunkSeq < total - 1; chunkSeq++) {
-      const seq = 1 + chunkSeq
+    // ⚠️ 顺序要与页面**完全一致**：清单分帧占 seq 0..partCount-1，
+    //    所以取块是 `manifestParts + chunkSeq`、ack 也是同一个消息序号。
+    //    （第一次修 off-by-one 时这里写死 `1 + chunkSeq`；现在清单可拆分，
+    //    偏移必须来自运行时读到的 partCount，否则清单一大就取错消息。）
+    for (let chunkSeq = 0; chunkSeq < wire.totalChunks; chunkSeq++) {
+      const seq = manifestParts + chunkSeq
       let got = false
       for (let i = 0; i < 120 && !got; i++) {
         const r = await fetch(url(`?seq=${seq}`))
@@ -163,7 +175,7 @@ async function transfer({ ackMode, idleTimeoutMs = 4000 }) {
         await fetch(url(`/ack?upTo=${seq}`), { method: 'POST' })
         lastSent = seq
       } else if (ackMode === 'page') {
-        ackedSeq = 1 + chunkSeq            // 与页面一致：ack 的是消息序号
+        ackedSeq = seq                     // 与页面一致：ack 的是消息序号
         flushAcks()                        // 不 await，与页面一致
       }
     }
@@ -269,9 +281,13 @@ test('⭐ 页面：中继的两处序号偏移都不能少（都是真踩过的 
   const relay = codeOnly(html.slice(html.indexOf('function relayTransport'),
     html.indexOf('/** 按链接判断该用哪条通路 */')))
 
-  // ① 取块：清单占 seq 0，所以块 i 要取 `1 + i`
-  assert.match(relay, /fetchSeq\(1 \+ seq\)/,
-    '取块必须用 `1 + seq`（清单占 seq 0）')
+  // ① 取块：清单分帧占 seq 0..partCount-1，所以块 g 要取 `partCount + g`。
+  //    （2026-10 清单改成可拆分后，这里从写死的 `1 + seq` 变成用运行时读到的
+  //     manifestParts —— 它来自 seq=0 分片头里的 partCount，见下面 prepare。）
+  assert.match(relay, /fetchSeq\(manifestParts \+ seq\)/,
+    '取块必须用 `manifestParts + seq`（清单分帧占用 seq 0..partCount-1）')
+  assert.match(relay, /manifestParts = framed\.partCount/,
+    'manifestParts 必须来自清单分片头里的 partCount，不能写死 1')
 
   // ② ack：同样要用消息序号，不能直接拿块序号去 ack。
   //    少了这个 +1，中继的 ackedBase 会永远停在 total-1，
@@ -284,8 +300,9 @@ test('⭐ 页面：中继的两处序号偏移都不能少（都是真踩过的 
   const at = relay.indexOf('function ackChunk')
   assert.ok(at > 0, '找不到 ackChunk')
   const ackFn = relay.slice(at, at + 400)
-  assert.match(ackFn, /const seq = 1 \+ chunkSeq/,
-    'ackChunk 必须把块序号转成消息序号（`1 + chunkSeq`）—— 取块那边用了 +1，ack 这边也必须用')
+  assert.match(ackFn, /const seq = manifestParts \+ 1 \+ chunkSeq/,
+    'ackChunk 必须把块序号转成消息序号（`manifestParts + 1 + chunkSeq`）—— ' +
+    '取块那边用了 manifestParts + seq，ack 这边也必须带上同一个偏移')
 
   // ③ 消息的**类型字节**：中继存的是 `[类型][负载]`，切片前必须先剥掉
   assert.match(relay, /msg\[0\] !== MSG_MANIFEST/, '清单消息要校验类型字节')

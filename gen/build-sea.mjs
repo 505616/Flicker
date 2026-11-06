@@ -15,7 +15,12 @@
  *
  * 关于 postject：这是唯一一个构建期第三方工具，运行期零依赖不变。
  * 试过自己实现 PE 段注入，但那是一条容易出错的路；postject 是 Node 官方文档
- * 指定的工具，且只在构建机器的 devDependencies 里出现。
+ * 指定的工具。
+ *
+ * ⚠️ 它**不在** `package.json` 的 devDependencies 里（本项目连 devDependencies 都是空的，
+ * `gen/check-no-deps.mjs` 守着"零依赖"）：注入时用 `npx --yes postject@1.0.0-alpha.6`
+ * **临时从 npm registry 下载**。也就是说构建期必须联网，且没有 tarball 完整性校验
+ * （只有版本号钉死）。离线构建需要先把 postject 放进本地缓存/私有源。
  *
  * 用法：
  *   node gen/build-sea.mjs                 # 构建当前平台
@@ -26,12 +31,12 @@ import { spawnSync } from 'node:child_process'
 import {
   copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundle } from './bundler.mjs'
 import { SOURCE_ASSETS, digestAll } from './asset-digests.mjs'
 import { runNpx } from './npx.mjs'
+import { buildSeaConfig, resolveBuildDir } from './sea-config.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -49,21 +54,24 @@ const OUT_DIR = path.join(ROOT, 'dist')
 /**
  * 构建目录。
  *
- * ⚠️ **名字必须是确定的，不许带时间戳/随机数。**
+ * ⚠️ **两条约束都是为了"可复现构建"**（`release.mjs` 的校验值承诺靠它）：
  *
- * 这个路径会**进 SEA blob** —— 入口文件名是 `…/sea-entry.cjs`，它以绝对路径的形式
- * 被写进产物（错误信息与堆栈里要显示它）。所以"带时间戳的临时目录"会让
- * **同样的源码产出不同的二进制**，可复现构建就没了。
+ *   ① 名字必须确定（不许时间戳/随机数）。实测（2026-10）：连续两次构建的产物
+ *      只差 7 个字节，diff 出来正是构建目录名里的那串时间戳。
+ *   ② 路径必须**稳定且不把绝对路径带进 blob**。2026-11 之前这里用
+ *      `path.join(tmpdir(), `flicker-sea-build-${platform}`)`：名字确定了，但 `tmpdir()`
+ *      本身随机器/用户变化（`C:\\Users\\alice\\AppData\\Local\\Temp` vs `/tmp`），
+ *      而入口路径会被写进 SEA blob —— 换台机器/换个 TMPDIR 就不可复现了。
  *
- * 实测（2026-10）：连续两次构建的产物只差 7 个字节，diff 出来正是
- * `…/flicker-sea-build-1791953763234/sea-entry.cjs` 里的那串时间戳。
- * 而 `release.mjs` 明写着"校验值 + 可复现构建"，README 也用这一点说服人下载 ——
- * 一个做不到的承诺比没有承诺更糟。
+ * 现在的做法：目录放在仓库的 `dist/` 下（gitignore 与赠品排除都已覆盖），
+ * 并且 `sea-config.json` 里只写**相对路径**、以构建目录为 cwd 调 node
+ * （见 gen/sea-config.mjs 的说明与 test/build-sea.test.js 的"换目录 blob 字节不变"）。
+ * 于是 blob 里只有 `sea-entry.cjs` 这样的相对文件名，与机器路径无关。
  *
  * 按平台命名（而不是按时间）就够了：同一台机器同一时间不会构建两个同平台产物；
  * 真并行构建时目录冲突会**立刻报错**，比悄悄产出两个不同的二进制好得多。
  */
-const BUILD = path.join(tmpdir(), `flicker-sea-build-${platformTag()}`)
+const BUILD = resolveBuildDir({ root: ROOT, platformTag: platformTag() })
 
 function log(step, msg) { console.log(`  ${step} ${msg}`) }
 function fail(msg) { console.error(`\n  ✗ ${msg}\n`); process.exitCode = 1; throw new Error(msg) }
@@ -185,25 +193,17 @@ try {
   // ③ SEA blob
   log('③', '生成 SEA blob…')
   const cfgPath = path.join(BUILD, 'sea-config.json')
-  writeFileSync(cfgPath, JSON.stringify({
-    main: path.join(BUILD, 'sea-entry.cjs'),
-    output: path.join(BUILD, 'sea-prep.blob'),
-    disableExperimentalSEAWarning: true,
-    useSnapshot: false,
-    useCodeCache: false,
-    // ⚠️ app.cjs 也必须作为**资产**嵌入，不能只放磁盘上：
-    //    SEA 里 require() 只认内置模块，加载不了文件；
-    //    入口是用 sea.getAsset('app.cjs') 取出源码再 module._compile 执行的。
-    assets: Object.fromEntries([
-      ...ASSETS.map((rel) => [rel, path.join(BUILD, rel)]),
-      ['app.cjs', path.join(BUILD, 'app.cjs')],
-      ['version.json', path.join(BUILD, 'version.json')],
-      // 源码 + 文档的打包（赠品要用，见上面生成它的那段说明）
-      [embeddedSourcePack, path.join(BUILD, embeddedSourcePack)],
-    ]),
-  }, null, 2), 'utf8')
+  // ⚠️ 配置里**只写相对路径**（相对构建目录），并且下面以 BUILD 为 cwd 去跑 node：
+  //    绝对路径会进 blob，而 blob 进产物 —— 可复现构建就没了（见 gen/sea-config.mjs）。
+  // ⚠️ app.cjs 也必须作为**资产**嵌入，不能只放磁盘上：
+  //    SEA 里 require() 只认内置模块，加载不了文件；
+  //    入口是用 sea.getAsset('app.cjs') 取出源码再 module._compile 执行的。
+  writeFileSync(cfgPath, JSON.stringify(buildSeaConfig({
+    assets: ASSETS,
+    embeddedSourcePack,
+  }), null, 2), 'utf8')
 
-  const blobRun = run(process.execPath, ['--experimental-sea-config', cfgPath])
+  const blobRun = run(process.execPath, ['--experimental-sea-config', 'sea-config.json'], { cwd: BUILD })
   const blobPath = path.join(BUILD, 'sea-prep.blob')
   if (blobRun.code !== 0 || !existsSync(blobPath)) {
     fail(`SEA blob 生成失败:\n${blobRun.out}`)

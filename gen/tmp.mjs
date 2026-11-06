@@ -30,11 +30,11 @@ import path from 'node:path'
 const mine = new Set()
 
 /**
- * 我们所有工具用的名字前缀 —— 清理脚本按它认领，别改得太随意。
+ * 我们所有工具**允许创建**的临时目录前缀 —— `makeTempDir()` 按它做白名单。
  *
  * ⚠️ 只列**能确定是我们建的**前缀。太通用的（`sw-`、`shot-`、`race-`…）不算：
- *    清理脚本宁可漏掉几个，也不能删掉别的程序放在临时目录里的东西 ——
- *    那比"留下垃圾"严重得多。那些脚本的目录名已统一改成 `flicker-` 开头。
+ *    创建了一个认不出来的目录 = 用户硬盘上的垃圾。
+ *    那些脚本的目录名已统一改成 `flicker-` 开头。
  */
 export const PREFIXES = Object.freeze([
   'flicker-',            // 我们自己建的一切（smoke / cert / 测试 / 演练 / 体检…）
@@ -47,6 +47,21 @@ export const PREFIXES = Object.freeze([
   'probe-gift-',         // _lab/probe-relay-gift.mjs
   'probe-source-pack-',  // _lab/probe-source-pack-runnable.mjs
 ])
+
+/**
+ * 清理脚本**允许删除**的前缀 —— 比上面的创建清单**更窄**，这是刻意的。
+ *
+ * ── 为什么必须拆成两个清单（2026-11 修正）──
+ * 从前 `sweepStale()` 直接按 `PREFIXES` 删目录，而里面有个 `bench-` ——
+ * 这是个**任何程序都可能用**的通用前缀：别人的 `%TEMP%/bench-*` 会被我们
+ * 跑一次 `npm test` 顺手删掉。创建错了只多一个垃圾目录，删除错了是删别人的东西，
+ * 两者不该共用一张清单。所以删除只认最强的那个标记 `flicker-`：
+ *   · `flicker-` 是项目名，别的程序不会碰；
+ *   · 其余前缀创建的目录仍然会在**创建它的进程**退出时删掉（`makeTempDir` 登记了
+ *     `exit`/信号钩子），只是不再被"事后扫地"跨进程认领。
+ * 宁可漏掉几个旧目录，也不冒删错的险（见 clean-temp.mjs 顶部同一段论证）。
+ */
+export const SWEEP_PREFIXES = Object.freeze(['flicker-'])
 
 /**
  * 建一个临时目录并登记清理。

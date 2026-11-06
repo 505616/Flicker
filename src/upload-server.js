@@ -38,7 +38,7 @@ import { sanitizeRelPath, dedupePath } from './manifest.js'
 // ⚠️ 一条消息的固定开销只有**一份**定义（`src/chunk-size.js`）。
 //    从前这里另写了一个 17 —— 单跑没问题，打成一个文件时撞名（打包器拒绝构建）。
 //    这类"重复定义"是这个项目明确要挡的东西：两份实现迟早会漂移。
-import { MESSAGE_OVERHEAD } from './chunk-size.js'
+import { MESSAGE_OVERHEAD, MIN_CHUNK_BYTES } from './chunk-size.js'
 import { EVENTS } from './plugin/events.js'
 
 /** 默认上限（部署方/用户可以调） */
@@ -98,6 +98,7 @@ export const RECV_ERROR_STATUS = Object.freeze({
   BAD_MANIFEST: 400, EMPTY_MANIFEST: 400, BAD_CHUNK: 400,
   BAD_CHUNK_BYTES: 400, BAD_CHUNKS: 400, E_CHUNK_AUTH: 400,
   TOO_MANY_BAD_CHUNKS: 400, E_PATH_UNSAFE: 400, E_MANIFEST_DUPLICATE_PATH: 400,
+  E_MANIFEST_UNVERIFIABLE: 400,
   BODY_TOO_LARGE: 413, TOO_MANY_FILES: 413, TOO_MANY_BYTES: 413,
   MANIFEST_TWICE: 409, ALREADY_FINISHED: 409, INCOMPLETE: 409, NO_MANIFEST: 409,
   NO_SPACE: 507,
@@ -118,7 +119,7 @@ const b64 = (buf) => Buffer.from(buf).toString('base64')
  *   默认**自动改名**（最安全，永不覆盖）。
  * @param {object} [o.plugins] 插件注册表（可选）。给了就按《插件.md》的"接收端进程平面"
  *   发事件；**插件出错不打断接收**（错误记进 `plugins.errors`，见 `emitAsyncSafe`）。
- * @param {object} [o.deps] 注入依赖，便于测试（`statfs`、`readFile` 之类）
+ * @param {object} [o.deps] 注入依赖，便于测试（`statfs`、`open`、`sleep` 之类）
  * @returns {{session:Session, handle:Function, state:object, close:Function, report:Function}}
  */
 export function createReceiveSession({
@@ -126,8 +127,24 @@ export function createReceiveSession({
 } = {}) {
   const LIMITS = { ...DEFAULT_LIMITS, ...limits }
   const statfsImpl = deps.statfs ?? statfs
+  /** 注入点：测试用它统计"每个文件被打开了几次"（P1-1） */
+  const openImpl = deps.open ?? open
 
-  const session = new Session({ password, onEvent, role: 'receiver' })
+  /**
+   * 清单里声明的总块数上限（P2-5）。
+   *
+   * 每个文件的"哪些块收到了"是按**声明**的 `chunks` 分配的（`Uint8Array(chunks)`）。
+   * 旧实现只校验了 `chunkBytes` 的上界：`size=200GiB, chunkBytes=1` 会要求
+   * 2e11 字节的位图；拆成多个文件还能反复尝试，足以把接收进程的内存打满。
+   * 合规清单的块数天然有界（`chunkBytes >= MIN_CHUNK_BYTES`，总量 ≤ maxBytes），
+   * 再加每个空文件占 1 块；超过这个数就一定不是正常客户端生成的。
+   */
+  const MAX_TOTAL_CHUNKS = Number.isFinite(LIMITS.maxBytes)
+    ? Math.ceil(LIMITS.maxBytes / MIN_CHUNK_BYTES) + Math.max(0, Number(LIMITS.maxFiles) || 0)
+    : Number.MAX_SAFE_INTEGER
+
+  // `deps.sleep` 是失败退避的睡眠函数注入点（P2-1）：测试不需要真的睡 1/2/4/8 秒。
+  const session = new Session({ password, onEvent, role: 'receiver', sleep: deps.sleep })
 
   /**
    * 给插件发一个事件（没有插件时是空操作）。
@@ -220,6 +237,26 @@ export function createReceiveSession({
     } catch { return false }
   }
 
+  /**
+   * 同一个文件的写盘锁（P1-1）。
+   *
+   * 手机页默认 3 个块并发上传（`INFLIGHT = 3`），所以同一个文件的前 3 块会同时到达。
+   * 旧写法是 `if (!file.handle) file.handle = await open(partPath, 'w')`：3 个请求
+   * 同时看到 handle 为空，各自 `open(..., 'w')`，而 `'w'` **每次都会截断文件** ——
+   * 后打开的会把先写进去的块清掉；被覆盖的 FileHandle 也没人 close（fd 泄漏，
+   * Node 会打印 "Closing file descriptor … on garbage collection"）。
+   *
+   * 这里用一条 promise 链把同一文件的"打开 + 写入"串起来：同一时刻只有一个写者，
+   * 句柄只打开一次。不同文件之间仍然完全并行（互不影响）。
+   */
+  function withFileWriteLock(file, fn) {
+    const prev = file.writeLock ?? Promise.resolve()
+    const run = prev.then(fn, fn)   // 前一次失败不影响后一次（失败只属于那一次请求）
+    // 尾节点只保留"永不 reject"的版本：既保证顺序，又不会产生 unhandled rejection
+    file.writeLock = run.then(() => {}, () => {})
+    return run
+  }
+
   // ── 路由 ───────────────────────────────────────────────────
 
   /** `POST /up/session?k=<一次性令牌>` —— 发挑战，手机据此算 MAC */
@@ -247,7 +284,17 @@ export function createReceiveSession({
   /** `POST /up/auth` —— 手机证明它知道密码；我们回自己的应答 */
   async function handleAuth(req, res) {
     const body = JSON.parse((await readBody(req, 4096)).toString('utf8') || '{}')
-    const out = session.finishAuth({ mac: body.mac, challenge: body.challenge, macProfile: body.macProfile })
+    let out
+    try {
+      out = session.finishAuth({ mac: body.mac, challenge: body.challenge, macProfile: body.macProfile })
+    } catch (e) {
+      // P2-1：文档 §4.6 要求每次失败延迟 1/2/4/8s 再回应（让在线爆破付出真实时间代价）。
+      // 与发送端 src/server.js 的 /api/auth/finish 走**同一个** Session 方法 ——
+      // 两边的退避曲线不能各写一份，否则一条路先被爆破穿。
+      // 延迟放在抛错之前：此时响应还没发出。
+      await session.applyFailureBackoff()
+      throw e
+    }
     await emitP(EVENTS.RECV_AUTH, { peer: peerInfo(session.peer), macProfile: session.macProfile ?? null })
     json(res, 200, out)
   }
@@ -287,6 +334,8 @@ export function createReceiveSession({
 
     // ── 路径安全：任何一条不符就**中止整个会话**（与接收端页面同一策略）──
     const seen = new Set()
+    // 累计声明的块数（P2-5）：见 MAX_TOTAL_CHUNKS 的说明
+    let plannedChunks = 0
     for (const f of wire.files) {
       const raw = String(f.rel ?? '')
       if (raw.includes('/') || raw.includes('\\')) {
@@ -309,16 +358,43 @@ export function createReceiveSession({
       f.rel = safe
       // 分块参数必须自洽：AAD 绑定了"总块数"与"最后一块的明文长度"，
       // 对不上就一定会验块失败 —— 与其传到一半才发现，不如现在拒绝。
+      const size = Number(f.size)
+      if (!Number.isInteger(size) || size < 0) {
+        throw new SessionError(`文件大小不合法：${f.size}`, 'BAD_CHUNKS')
+      }
       const cb = Number(f.chunkBytes)
-      if (!Number.isInteger(cb) || cb <= 0 || cb + MESSAGE_OVERHEAD > LIMITS.maxChunkBytes) {
+      if (!Number.isInteger(cb) || cb < 1 || cb + MESSAGE_OVERHEAD > LIMITS.maxChunkBytes) {
         throw new SessionError(
-          `块大小不合法：${f.chunkBytes}（本机允许一块最多 ${LIMITS.maxChunkBytes - MESSAGE_OVERHEAD} 字节明文）`,
+          `块大小不合法：${f.chunkBytes}（本机允许一块 1 ~ ${LIMITS.maxChunkBytes - MESSAGE_OVERHEAD} 字节明文）`,
           'BAD_CHUNK_BYTES')
       }
-      const wantChunks = Math.max(1, Math.ceil(Number(f.size) / cb))
-      if (!Number.isInteger(f.chunks) || f.chunks !== wantChunks) {
+      const wantChunks = Math.max(1, Math.ceil(size / cb))
+      if (!Number.isInteger(f.chunks) || f.chunks < 1 || f.chunks !== wantChunks) {
         throw new SessionError(
           `分块数对不上：声明 ${f.chunks}，按 ${f.size} 字节 / ${cb} 字节一块应为 ${wantChunks}`, 'BAD_CHUNKS')
+      }
+      // P3-3：sha256 必填（与 pull 端同一条判据）。缺了它，定稿时只能"跳过整文件
+      // 校验直接改名"——那等于把文件完整性交给对端口头承诺；格式错（非 64 位十六进制）
+      // 一样过不了 finish 的比对，只会传到一半才失败。
+      // 这里在**任何字节写入之前**拒绝整份清单。
+      // ⚠️ 这个码登记在 RECV_ERROR_STATUS（400），并与 PROTOCOL §7R.10 的码表双向核对：
+      //    gen/check-recv-protocol-doc.mjs 会拿本表与文档逐行比对，文档缺行也会红。
+      if (typeof f.sha256 !== 'string' || !/^[0-9a-fA-F]{64}$/.test(f.sha256)) {
+        const e = new SessionError(
+          `清单里的「${safe}」缺少有效的 sha256（必须是 64 位十六进制）—— ` +
+          '无法做整文件校验，已拒绝整份清单（一个字节都没有写入）',
+          'E_MANIFEST_UNVERIFIABLE')
+        e.status = 400
+        throw e
+      }
+      f.sha256 = f.sha256.toLowerCase()
+      plannedChunks += f.chunks
+      // 上界：每个文件的"已收块"位图按声明的块数分配内存（P2-5）。
+      // 合规清单的块数天然有界，超过这个数的一定是构造出来的，开工前拒绝。
+      if (plannedChunks > MAX_TOTAL_CHUNKS) {
+        throw new SessionError(
+          `清单声明的总块数太多（${plannedChunks} > ${MAX_TOTAL_CHUNKS}）—— ` +
+          `正常分块（每块 ≥ ${MIN_CHUNK_BYTES} 字节）不会产生这么多块`, 'BAD_CHUNKS')
       }
     }
 
@@ -368,7 +444,7 @@ export function createReceiveSession({
         size: Number(f.size),
         chunks: f.chunks,
         chunkBytes: Number(f.chunkBytes),
-        sha256: typeof f.sha256 === 'string' ? f.sha256 : null,
+        sha256: f.sha256,          // 清单阶段已强制存在且为 64 位十六进制（P3-3）
         finalPath: path.join(dir, rel),
         partPath: path.join(dir, rel + PART_SUFFIX),
         handle: null,
@@ -402,6 +478,24 @@ export function createReceiveSession({
       diskFree,
       partSuffix: PART_SUFFIX,
     })
+  }
+
+  /**
+   * 记一次"这一块验不过"并抛错。
+   *
+   * 两个调用点共用：GCM 认证失败（数据损坏/被改）与**解密长度不符**（P3-4）。
+   * 语义与 P3-1 的"连续失败"一致：连续到上限就销毁会话。
+   */
+  function rejectChunk(ci, detail) {
+    state.chunkFailures++
+    if (state.chunkFailures >= LIMITS.maxChunkFailures) {
+      session.destroy()
+      throw new SessionError(
+        `连续 ${state.chunkFailures} 块校验失败，已中止这次会话`, 'TOO_MANY_BAD_CHUNKS')
+    }
+    const e = new SessionError(`第 ${ci} 块校验失败（${detail}）`, 'E_CHUNK_AUTH')
+    e.status = 400
+    throw e
   }
 
   /** `PUT /up/chunk?f=<下标>&c=<块号>` —— 收一块，验一块，写一块 */
@@ -438,25 +532,30 @@ export function createReceiveSession({
     try {
       plain = openChunk(session.keys.enc, fi, ci, file.chunks, body.subarray(16), body.subarray(0, 16), plainLen)
     } catch {
-      state.chunkFailures++
-      const e = new SessionError(
-        `第 ${ci} 块校验失败（数据损坏或被改过）`, 'E_CHUNK_AUTH')
-      e.status = 400
-      if (state.chunkFailures >= LIMITS.maxChunkFailures) {
-        session.destroy()
-        throw new SessionError(
-          `连续 ${state.chunkFailures} 块校验失败，已中止这次会话`, 'TOO_MANY_BAD_CHUNKS')
-      }
-      throw e
+      rejectChunk(ci, '数据损坏或被改过')
+    }
+    // P3-4：GCM 只证明"这段密文配得上这个 AAD"，而 AAD 里的 plainLen 取自**清单声明值**，
+    // 与密文长度无关 —— 持有密码的人可以发一块"认证通过但长度不对"的数据。
+    // 旧实现直接按 plain.length 写盘，于是文件实际大小可以和清单不符却照样定稿
+    // （再叠加 P3-3 的缺失 sha256 就完全无法发现）。长度必须在这里显式验。
+    if (plain.length !== plainLen) {
+      rejectChunk(ci, `解密出 ${plain.length} 字节，与清单声明的 ${plainLen} 字节不一致`)
     }
 
-    if (!file.handle) file.handle = await open(file.partPath, 'w')
-    await file.handle.write(plain, 0, plain.length, ci * file.chunkBytes)
+    // 同一文件的并发块必须串行写入（P1-1，见 withFileWriteLock 的说明）
+    await withFileWriteLock(file, async () => {
+      if (!file.handle) file.handle = await openImpl(file.partPath, 'w')
+      await file.handle.write(plain, 0, plain.length, ci * file.chunkBytes)
+    })
     file.received[ci] = 1
     file.receivedChunks++
     file.receivedBytes += plain.length
     state.receivedChunks++
     state.receivedBytes += plain.length
+    // P3-1：`maxChunkFailures` 的语义是"**连续**多少个块验不过"（见 DEFAULT_LIMITS），
+    // 所以成功收下一块就把计数归零。旧实现只增不减，长传输里累计 10 次零散坏块
+    // （移动网络/重传异常）会中止整次会话。
+    state.chunkFailures = 0
     session.onEvent({
       type: 'chunk-received',
       fileName: file.rel,
@@ -516,9 +615,13 @@ export function createReceiveSession({
 
     const done = [], failed = []
     for (const f of state.accepted) {
+      // 先等在途写盘落盘，再关句柄/算摘要（P1-1 的串行写链）
+      if (f.writeLock) await f.writeLock
       if (f.handle) { await f.handle.close(); f.handle = null }
       const got = await hashOfFile(f)
-      if (f.sha256 && got !== f.sha256) {
+      // P3-3：清单阶段已经强制每个文件都有合法 sha256，所以这里**没有**
+      // "没有摘要就跳过校验"的旁路；一旦对不上就不定稿（半成品保留供排查）。
+      if (got !== f.sha256) {
         // ⚠️ 校验不过就**不改成正式名字**：半成品留在磁盘上（`.flicker-part`），
         //    既不污染正常文件，也留下证据供排查。
         const reason = `整文件校验不通过（期望 ${f.sha256.slice(0, 16)}…，实际 ${got.slice(0, 16)}…）`
@@ -570,6 +673,14 @@ export function createReceiveSession({
       'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
+      // 手机上传页同样要 CSP（review 的 P2：局域网服务器与中继页都有，这一页漏了）。
+      // 页面是**自包含**的（文案、内核、图标全部内联），所以不需要任何外部来源；
+      // 一旦这里出现 XSS，没有 CSP 就等于给了攻击者一个向任意外部地址外发的通道。
+      // 各条与 src/server.js 的 sec 保持一致，避免三套页面漂移。
+      'Content-Security-Policy':
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+        "img-src data:; connect-src 'self'; worker-src blob:; " +
+        "form-action 'none'; base-uri 'none'",
     })
     res.end(buf)
   }
@@ -613,6 +724,8 @@ export function createReceiveSession({
   async function close() {
     const reason = state.finished ? 'finished' : 'closed'
     for (const f of state.accepted) {
+      // 销毁可能发生在写盘途中：先等在途写入结束，避免"关掉句柄还往里写"（P1-1）
+      if (f.writeLock) { try { await f.writeLock } catch { /* 链本身不抛 */ } }
       if (f.handle) { try { await f.handle.close() } catch { /* 尽力而为 */ } f.handle = null }
     }
     session.destroy()
@@ -653,7 +766,30 @@ export async function startReceiveServer(opts = {}) {
     ? createServer({ key: opts.tls.key, cert: opts.tls.cert }, handler)
     : createHttpServer(handler)
   const host = opts.host ?? '127.0.0.1'
-  await new Promise((r) => server.listen(opts.port ?? 0, host, r))
+  // ⚠️ `listen` 必须有人听 'error'（P2-6）：端口被占用时 Node 会把 'error'
+  //    当成未处理事件直接抛穿进程 —— 表现是 EADDRINUSE 崩溃、调用方的销毁链
+  //    （临时证书目录、会话密钥、已装进信任库的 CA）一步都不跑。
+  //    这里把它变成一次可捕获的 reject；同时先把刚建好的会话关掉。
+  try {
+    await new Promise((resolve, reject) => {
+      const onError = (err) => reject(err)
+      server.once('error', onError)
+      server.listen(opts.port ?? 0, host, () => {
+        server.off('error', onError)
+        resolve()
+      })
+    })
+  } catch (err) {
+    await receive.close().catch(() => { /* 尽力而为：销毁链由调用方继续走 */ })
+    if (err?.code === 'EADDRINUSE') {
+      const e = new Error(
+        `端口 ${opts.port} 已被其它程序占用（EADDRINUSE）—— 换一个端口，或先关掉占用它的程序`)
+      e.code = 'EADDRINUSE'
+      e.cause = err
+      throw e
+    }
+    throw err
+  }
   const port = server.address().port
   const scheme = opts.tls ? 'https' : 'http'
   return {

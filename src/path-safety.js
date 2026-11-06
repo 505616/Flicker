@@ -175,17 +175,35 @@ export function checkRelPath(raw, opts = {}) {
 
     if (doNormalize && typeof seg.normalize === 'function') seg = seg.normalize('NFC')
 
-    if (win && WIN_RESERVED.test(seg)) {
-      // 保留名**不能**靠改名绕过：CON → _CON 会让用户以为收到了 `CON`，
-      // 而那个文件在 Windows 上根本打不开。直接报错、说清原因。
-      throw new UnsafePathError('R8', `拒绝 Windows 保留设备名: ${seg}（这类名字在 Windows 上无法创建）`, raw)
-    }
     if (win) {
-      // 非法字符：改写，不拒绝（见上面的说明）
+      // ⚠️ 顺序是有意的：**先规范化（改写），再做保留名判定**。
+      //
+      // 旧写法先查保留名、后去结尾空格 → `CON ` 判定时还是 `CON `（正则不匹配），
+      // 之后才被裁成 `CON` 放行 —— 而 `CON` 在 Windows 上根本创建不了。
+      // `CON .txt` 同理：保留名的判据是"第一个点之前的那一段名字"，
+      // 必须把那一段结尾的空格/点先去掉再比（Windows 解析设备名时就是这么做的）。
+      //
+      // 控制字符（0x00–0x1F）在 Windows 文件名里非法。这里**明确拒绝**而不是改写：
+      // 把 `a\x01b` 静默改成 `a_b` 会让用户收到一个自己没见过的名字，而这条输入
+      // 在 Linux 发送端是完全正常的文件名（P3-6）。拒绝会变成一次可读的"不能收"。
+      const ctrl = /[\x00-\x1f]/.exec(seg)
+      if (ctrl) {
+        throw new UnsafePathError('R9',
+          `拒绝含控制字符的文件名（0x${ctrl[0].charCodeAt(0).toString(16).padStart(2, '0')}）: ` +
+          JSON.stringify(seg), raw)
+      }
+      // 其余非法字符：改写，不拒绝（见上面的说明）
       if (WIN_ILLEGAL.test(seg)) seg = seg.replace(/[<>:"|?*]/g, '_')
       // 结尾的点与空格在 Windows 上会被**静默丢弃**：`a.` 与 `a` 变成同一个文件
       const trimmed = seg.replace(/[. ]+$/, '')
       if (trimmed !== seg) seg = trimmed || '_'
+      // 保留名判定放在规范化之后，而且看"第一个点之前、去掉结尾空格/点"的那一段：
+      // `CON`、`CON.txt`、`CON `、`CON .txt` 都会在这里被抓住。
+      if (WIN_RESERVED.test(seg.split('.')[0].replace(/[. ]+$/, ''))) {
+        // 保留名**不能**靠改名绕过：CON → _CON 会让用户以为收到了 `CON`，
+        // 而那个文件在 Windows 上根本打不开。直接报错、说清原因。
+        throw new UnsafePathError('R8', `拒绝 Windows 保留设备名: ${seg}（这类名字在 Windows 上无法创建）`, raw)
+      }
     }
     if (utf8Bytes(seg) > MAX_SEGMENT_BYTES) {
       throw new UnsafePathError('R7',
